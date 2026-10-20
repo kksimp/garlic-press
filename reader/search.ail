@@ -1,0 +1,155 @@
+## Search over the text layer (ADR 0520): case-insensitive by default,
+## whitespace-insensitive, and across line breaks, joining a word hyphenated
+## at a line end. Each hit has the page, the line and the boxes it covers,
+## so a viewer can highlight it and an agent can point at it.
+
+pub struct Hit
+    pub page int
+    pub line int
+    pub text str
+    pub boxes List[Box]
+    ## Per line: `[line, a, b]`, characters `a..b` of that line's text.
+    pub spans List[List[int]]
+
+impl ToJson for Hit
+
+struct Flat
+    chars List[str]
+    line List[int]
+    col List[int]
+
+fn norm_char(c char, case bool) str
+    if c.is_space()
+        return " "
+    if case then c.to_str() else c.to_lower().to_str()
+
+## A pattern as search compares it.
+pub fn norm_pattern(p str, case bool) str
+    mut out := List[str]()
+    for c in p.trim().chars()
+        s := norm_char(c, case)
+        if s == " " and out.len() > 0 and out[out.len() - 1] == " "
+            continue
+        out.push(s)
+    out.join("")
+
+fn flatten(lines List[Line], case bool) Flat
+    mut f := Flat(chars: [], line: [], col: [])
+    for li in 0..lines.len()
+        cs := lines[li].text.chars()
+        if f.chars.len() > 0 and cs.len() > 0
+            prev := f.chars[f.chars.len() - 1]
+            if prev == "-"
+                and cs[0].is_alpha()
+                and f.chars.len() > 1
+                and f.chars[f.chars.len() - 2] != " "
+                # A word broken at the line end: drop the hyphen.
+                f.chars.pop()
+                f.line.pop()
+                f.col.pop()
+            elif prev != " "
+                f.chars.push(" ")
+                f.line.push(-1)
+                f.col.push(0)
+        for ci in 0..cs.len()
+            s := norm_char(cs[ci], case)
+            if s == " " and f.chars.len() > 0 and f.chars[f.chars.len() - 1] == " "
+                continue
+            f.chars.push(s)
+            f.line.push(li)
+            f.col.push(ci)
+    f
+
+## Every hit of `pattern` on a page.
+pub fn search_page(p Page, pattern str, case bool) List[Hit]
+    pat := norm_pattern(pattern, case)
+    mut hits := List[Hit]()
+    if pat == ""
+        return hits
+    f := flatten(p.lines, case)
+    text := f.chars.join("")
+    n := f.chars.len()
+    plen := pat.chars().len()
+    mut off := 0
+    while off < n
+        rest := text.slice(off, n)
+        at := rest.find(pat) else break
+        a := off + at
+        b := a + plen
+        hits.push(hit_of(p, f, a, b))
+        off = b
+    hits
+
+fn hit_of(p Page, f Flat, a int, b int) Hit
+    mut boxes := List[Box]()
+    mut spans := List[List[int]]()
+    mut first := -1
+    mut cur := -1
+    mut lo := 0
+    mut hi := 0
+    for i in a..b
+        li := f.line[i]
+        if li < 0
+            continue
+        if first < 0
+            first = li
+        if li != cur
+            if cur >= 0
+                boxes.push(box_of(p.lines[cur].box(lo, hi + 1)))
+                spans.push([cur, lo, hi + 1])
+            cur = li
+            lo = f.col[i]
+        hi = f.col[i]
+    if cur >= 0
+        boxes.push(box_of(p.lines[cur].box(lo, hi + 1)))
+        spans.push([cur, lo, hi + 1])
+    line := first.max(0)
+    text := if line < p.lines.len() then p.lines[line].text else ""
+    Hit(page: p.model.page, line: line, text: text, boxes: boxes, spans: spans)
+
+fn box_of(b List[float]) Box
+    Box(x0: r2(b[0]), y0: r2(b[1]), x1: r2(b[2]), y1: r2(b[3]))
+
+fn test_line(t str, y float) Line
+    n := t.chars().len()
+    Line(
+        text: t,
+        x: 0,
+        y: y,
+        size: 10,
+        starts: [i.to_float() * 5.0 for i in 0..n],
+        ends: [(i + 1).to_float() * 5.0 for i in 0..n],
+    )
+
+fn test_page(lines List[Line]) Page
+    m := PageModel(
+        page: 1,
+        width: 100,
+        height: 100,
+        rotate: 0,
+        lines: [],
+        links: [],
+        images: 0,
+        unreadable: 0,
+        image_only: false,
+    )
+    Page(model: m, lines: lines)
+
+@test fn finds_text_across_lines()
+    p := test_page([
+        test_line("Searching a PDF with-", 700.0),
+        test_line("out OCR is   easy", 686.0),
+    ])
+    hits := search_page(p, "without ocr", false)
+    assert_eq(hits.len(), 1)
+    assert_eq(hits[0].line, 0)
+    assert_eq(hits[0].boxes.len(), 2)
+    assert_eq(hits[0].boxes[0].x0, 80.0)
+    assert_eq(hits[0].spans, [[0, 16, 20], [1, 0, 7]])
+    assert_eq(search_page(p, "IS EASY", false).len(), 1)
+    assert_eq(search_page(p, "IS EASY", true).len(), 0)
+    assert_eq(search_page(p, "a", false).len(), 3)
+
+@test fn keeps_real_hyphens()
+    p := test_page([test_line("well -", 700.0), test_line("known", 686.0)])
+    assert_eq(search_page(p, "well - known", false).len(), 1)

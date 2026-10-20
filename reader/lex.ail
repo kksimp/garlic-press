@@ -1,0 +1,357 @@
+## PDF objects and their syntax (ISO 32000-2 section 7.2-7.3), read from bytes.
+##
+## One lexer serves files, object streams, content streams and CMaps: they
+## share the token syntax. Keywords (`obj`, `R`, `Tj`, `begincmap`) come out
+## as `Op`.
+
+pub enum Obj
+    Null
+    Bool(b bool)
+    Int(n int)
+    Real(x float)
+    Str(data List[int])
+    Name(s str)
+    Arr(items List[Obj])
+    Dict(d Map[str, Obj])
+    Ref(num int, gen int)
+    ## A stream: its dictionary and where its raw data sits in the file.
+    Stream(d Map[str, Obj], start int, len int)
+    Op(s str)
+
+## Accessors: the value when the object has that kind, else `none`.
+pub fn Obj.as_int(self) int?
+    match self
+        Int(n) => n
+        Null | Bool | Real | Str | Name | Arr | Dict | Ref | Stream | Op => none
+
+pub fn Obj.as_num(self) float?
+    match self
+        Int(n) => n.to_float()
+        Real(x) => x
+        Null | Bool | Str | Name | Arr | Dict | Ref | Stream | Op => none
+
+pub fn Obj.as_name(self) str?
+    match self
+        Name(s) => s
+        Null | Bool | Int | Real | Str | Arr | Dict | Ref | Stream | Op => none
+
+pub fn Obj.as_op(self) str?
+    match self
+        Op(s) => s
+        Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Stream => none
+
+pub fn Obj.as_arr(self) List[Obj]?
+    match self
+        Arr(items) => items
+        Null | Bool | Int | Real | Str | Name | Dict | Ref | Stream | Op => none
+
+pub fn Obj.as_dict(self) Map[str, Obj]?
+    match self
+        Dict(d) => d
+        Stream(d, _, _) => d
+        Null | Bool | Int | Real | Str | Name | Arr | Ref | Op => none
+
+pub fn Obj.as_bytes(self) List[int]?
+    match self
+        Str(data) => data
+        Null | Bool | Int | Real | Name | Arr | Dict | Ref | Stream | Op => none
+
+pub fn Obj.as_ref(self) int?
+    match self
+        Ref(num, _) => num
+        Null | Bool | Int | Real | Str | Name | Arr | Dict | Stream | Op => none
+
+pub fn Obj.as_bool(self) bool?
+    match self
+        Bool(b) => b
+        Null | Int | Real | Str | Name | Arr | Dict | Ref | Stream | Op => none
+
+pub struct Lexer
+    pub buf List[int]
+    pub pos int
+
+pub fn Lexer.new(buf List[int], pos int) Lexer
+    Lexer(buf: buf, pos: pos)
+
+## Whitespace (ISO 32000-2 table 1).
+pub fn is_white(c int) bool
+    c == 32 or c == 10 or c == 13 or c == 9 or c == 12 or c == 0
+
+## Delimiters (ISO 32000-2 table 2).
+pub fn is_delim(c int) bool
+    c == 40
+        or c == 41
+        or c == 60
+        or c == 62
+        or c == 91
+        or c == 93
+        or c == 123
+        or c == 125
+        or c == 47
+        or c == 37
+
+fn is_regular(c int) bool
+    not is_white(c) and not is_delim(c)
+
+fn hex_val(c int) int
+    if c >= 48 and c <= 57
+        return c - 48
+    if c >= 97 and c <= 102
+        return c - 87
+    if c >= 65 and c <= 70
+        return c - 55
+    -1
+
+pub fn Lexer.at_end(self) bool
+    pos >= buf.len()
+
+## Skips whitespace and `%` comments (7.2.3, 7.2.4).
+pub fn Lexer.skip_ws(mut self)
+    while pos < buf.len()
+        c := buf[pos]
+        if c == 37
+            while pos < buf.len() and buf[pos] != 10 and buf[pos] != 13
+                pos += 1
+        elif is_white(c)
+            pos += 1
+        else
+            return
+
+## The next token, or `none` at the end. Arrays and dictionaries come out as
+## `Op("[")`, `Op("]")`, `Op("<<")` and `Op(">>")`.
+pub fn Lexer.token(mut self) Obj?
+    skip_ws()
+    if pos >= buf.len()
+        return none
+    c := buf[pos]
+    if c == 47
+        return name()
+    if c == 40
+        return literal()
+    if c == 60
+        if pos + 1 < buf.len() and buf[pos + 1] == 60
+            pos += 2
+            return Obj.Op(s: "<<")
+        return hex_string()
+    if c == 62
+        if pos + 1 < buf.len() and buf[pos + 1] == 62
+            pos += 2
+            return Obj.Op(s: ">>")
+        pos += 1
+        return Obj.Op(s: ">")
+    if c == 91 or c == 93 or c == 123 or c == 125 or c == 41
+        pos += 1
+        return Obj.Op(s: chr(c).to_str())
+    if (c >= 48 and c <= 57) or c == 43 or c == 45 or c == 46
+        return number()
+    start := pos
+    while pos < buf.len() and is_regular(buf[pos])
+        pos += 1
+    word := source_text(buf, start, pos)
+    match word
+        "true" => Obj.Bool(b: true)
+        "false" => Obj.Bool(b: false)
+        "null" => Obj.Null
+        _ => Obj.Op(s: word)
+
+fn source_text(buf List[int], a int, b int) str
+    [chr(buf[i]) for i in a..b].join("")
+
+## A name, with `#xx` escapes (7.3.5).
+fn Lexer.name(mut self) Obj
+    pos += 1
+    mut out := List[char]()
+    while pos < buf.len() and is_regular(buf[pos])
+        c := buf[pos]
+        if c == 35
+            and pos + 2 < buf.len()
+            and hex_val(buf[pos + 1]) >= 0
+            and hex_val(buf[pos + 2]) >= 0
+            out.push(chr(hex_val(buf[pos + 1]) * 16 + hex_val(buf[pos + 2])))
+            pos += 3
+        else
+            out.push(chr(c))
+            pos += 1
+    Obj.Name(s: out.join(""))
+
+## A number: an integer, or a real with a `.` (7.3.3).
+fn Lexer.number(mut self) Obj
+    mut neg := false
+    if buf[pos] == 43 or buf[pos] == 45
+        neg = buf[pos] == 45
+        pos += 1
+    mut n := 0
+    mut frac := 0.0
+    mut scale := 1.0
+    mut real := false
+    mut digits := 0
+    while pos < buf.len()
+        c := buf[pos]
+        if c >= 48 and c <= 57
+            if real
+                scale = scale / 10.0
+                frac = frac + (c - 48).to_float() * scale
+            elif n < 100000000000000000
+                n = n * 10 + c - 48
+            digits += 1
+        elif c == 46 and not real
+            real = true
+        else
+            break
+        pos += 1
+    if real
+        x := n.to_float() + frac
+        return Obj.Real(x: if neg then - x else x)
+    Obj.Int(n: if neg then - n else n)
+
+## A literal string, with nested parentheses and escapes (7.3.4.2).
+fn Lexer.literal(mut self) Obj
+    pos += 1
+    mut out := List[int]()
+    mut depth := 1
+    while pos < buf.len()
+        c := buf[pos]
+        pos += 1
+        if c == 92
+            if pos >= buf.len()
+                break
+            e := buf[pos]
+            pos += 1
+            if e == 110
+                out.push(10)
+            elif e == 114
+                out.push(13)
+            elif e == 116
+                out.push(9)
+            elif e == 98
+                out.push(8)
+            elif e == 102
+                out.push(12)
+            elif e >= 48 and e <= 55
+                mut v := e - 48
+                mut k := 1
+                while k < 3 and pos < buf.len() and buf[pos] >= 48 and buf[pos] <= 55
+                    v = v * 8 + buf[pos] - 48
+                    pos += 1
+                    k += 1
+                out.push(v.bit_and(255))
+            elif e == 13
+                if pos < buf.len() and buf[pos] == 10
+                    pos += 1
+            elif e == 10
+                continue
+            else
+                out.push(e)
+        elif c == 40
+            depth += 1
+            out.push(c)
+        elif c == 41
+            depth -= 1
+            if depth == 0
+                break
+            out.push(c)
+        elif c == 13
+            # An end of line in a string is a line feed (7.3.4.2).
+            out.push(10)
+            if pos < buf.len() and buf[pos] == 10
+                pos += 1
+        else
+            out.push(c)
+    Obj.Str(data: out)
+
+## A hexadecimal string; an odd last digit is followed by 0 (7.3.4.3).
+fn Lexer.hex_string(mut self) Obj
+    pos += 1
+    mut out := List[int]()
+    mut hi := -1
+    while pos < buf.len()
+        c := buf[pos]
+        pos += 1
+        if c == 62
+            break
+        v := hex_val(c)
+        if v < 0
+            continue
+        if hi < 0
+            hi = v
+        else
+            out.push(hi * 16 + v)
+            hi = -1
+    if hi >= 0
+        out.push(hi * 16)
+    Obj.Str(data: out)
+
+## A whole object: arrays and dictionaries nest, and with `refs`, `N G R`
+## is an indirect reference (7.3.10). Content streams have no references,
+## so they read with `refs` false.
+pub fn Lexer.object(mut self, refs bool) Obj ! PdfError
+    t := token() else return Bad(why: "unexpected end of data")
+    match t
+        Op(s) =>
+            if s == "["
+                mut items := List[Obj]()
+                while true
+                    skip_ws()
+                    if pos < buf.len() and buf[pos] == 93
+                        pos += 1
+                        break
+                    if pos >= buf.len()
+                        return Bad(why: "unterminated array")
+                    items.push(object(refs)?)
+                return Obj.Arr(items: items)
+            if s == "<<"
+                mut d := Map[str, Obj]()
+                while true
+                    skip_ws()
+                    if pos + 1 < buf.len() and buf[pos] == 62 and buf[pos + 1] == 62
+                        pos += 2
+                        break
+                    if pos >= buf.len()
+                        return Bad(why: "unterminated dictionary")
+                    k := token() else return Bad(why: "unterminated dictionary")
+                    if key := k.as_name()
+                        d[key] = object(refs)?
+                return Obj.Dict(d: d)
+            t
+        Int(n) =>
+            if not refs
+                return t
+            save := pos
+            g := token() else return t
+            match g
+                Int(gen) =>
+                    if r := token()
+                        if r == Obj.Op(s: "R")
+                            return Obj.Ref(num: n, gen: gen)
+                Null | Bool | Real | Str | Name | Arr | Dict | Ref | Stream | Op => pos = save
+            pos = save
+            t
+        Null | Bool | Real | Str | Name | Arr | Dict | Ref | Stream => t
+
+@test fn reads_objects() !
+    mut l := Lexer.new(
+        ascii("<< /Type /Page /Kids [3 0 R 4 0 R] /N -2.5 /S (a\\(b\\)\\101) /H <414> /K#20x true >>"),
+        0,
+    )
+    o := l.object(true)?
+    match o
+        Dict(d) =>
+            assert_eq(d["Type"], Obj.Name(s: "Page"))
+            assert_eq(d["Kids"], Obj.Arr(items: [Obj.Ref(num: 3, gen: 0), Obj.Ref(num: 4, gen: 0)]))
+            assert_eq(d["N"], Obj.Real(x: -2.5))
+            assert_eq(d["S"], Obj.Str(data: ascii("a(b)A")))
+            assert_eq(d["H"], Obj.Str(data: ascii("A@")))
+            assert_eq(d["K x"], Obj.Bool(b: true))
+        Null | Bool | Int | Real | Str | Name | Arr | Ref | Stream | Op => assert(false)
+
+@test fn reads_content_tokens() !
+    mut l := Lexer.new(ascii("BT /F1 12 Tf 1 0 0 1 72 700 Tm [(Hi) -250 (there)] TJ ET % note"), 0)
+    mut ops := List[str]()
+    while true
+        match l.object(false)?
+            Op(s) => ops.push(s)
+            Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Stream => continue
+        l.skip_ws()
+        if l.at_end()
+            break
+    assert_eq(ops, ["BT", "Tf", "Tm", "TJ", "ET"])

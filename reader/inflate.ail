@@ -1,0 +1,279 @@
+## Inflate (RFC 1951) and the zlib wrapper (RFC 1950), written from the RFCs.
+##
+## A stopgap behind one function, `inflate_zlib` (ADR 0520): it becomes
+## `std.compress` when lane 128 lands (ADRs 0442-0446), and stays useful as
+## a differential oracle for it. Huffman codes decode canonically
+## (RFC 1951 section 3.2.2): count the codes of each length, then walk the
+## lengths one bit at a time.
+
+struct Huff
+    counts List[int]
+    symbols List[int]
+
+struct Bits
+    data List[int]
+    pos int
+    buf int
+    cnt int
+
+## Length bases and extra bits for codes 257..285 (RFC 1951 3.2.5).
+LEN_BASE := [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    13,
+    15,
+    17,
+    19,
+    23,
+    27,
+    31,
+    35,
+    43,
+    51,
+    59,
+    67,
+    83,
+    99,
+    115,
+    131,
+    163,
+    195,
+    227,
+    258,
+]
+
+LEN_EXTRA := [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+
+DIST_BASE := [
+    1,
+    2,
+    3,
+    4,
+    5,
+    7,
+    9,
+    13,
+    17,
+    25,
+    33,
+    49,
+    65,
+    97,
+    129,
+    193,
+    257,
+    385,
+    513,
+    769,
+    1025,
+    1537,
+    2049,
+    3073,
+    4097,
+    6145,
+    8193,
+    12289,
+    16385,
+    24577,
+]
+
+DIST_EXTRA := [
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    2,
+    2,
+    3,
+    3,
+    4,
+    4,
+    5,
+    5,
+    6,
+    6,
+    7,
+    7,
+    8,
+    8,
+    9,
+    9,
+    10,
+    10,
+    11,
+    11,
+    12,
+    12,
+    13,
+    13,
+]
+
+## The order code-length code lengths are sent in (RFC 1951 3.2.7).
+CL_ORDER := [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+FIXED_LIT := huff(fixed_lit_lengths())
+FIXED_DIST := huff([5 for _ in 0..30])
+
+fn fixed_lit_lengths() List[int]
+    mut l := List[int]()
+    for i in 0..288
+        l.push(if i < 144 then 8 else if i < 256 then 9 else if i < 280 then 7 else 8)
+    l
+
+fn huff(lengths List[int]) Huff
+    mut counts := [0 for _ in 0..16]
+    for l in lengths
+        counts[l] += 1
+    counts[0] = 0
+    mut offs := [0 for _ in 0..16]
+    for i in 1..15
+        offs[i + 1] = offs[i] + counts[i]
+    mut symbols := [0 for _ in 0..lengths.len()]
+    for s in 0..lengths.len()
+        l := lengths[s]
+        if l != 0
+            symbols[offs[l]] = s
+            offs[l] += 1
+    Huff(counts: counts, symbols: symbols)
+
+fn Bits.bits(mut self, n int) int ! PdfError
+    while cnt < n
+        if pos >= data.len()
+            return Bad(why: "deflate stream ends early")
+        buf = buf + data[pos].shl(cnt)
+        pos += 1
+        cnt += 8
+    v := buf.bit_and(1.shl(n) - 1)
+    buf = buf.shr(n)
+    cnt -= n
+    v
+
+fn Bits.decode(mut self, h Huff) int ! PdfError
+    mut code := 0
+    mut first := 0
+    mut index := 0
+    for l in 1..16
+        code += bits(1)?
+        count := h.counts[l]
+        if code - count < first
+            return h.symbols[index + code - first]
+        index += count
+        first = (first + count) * 2
+        code *= 2
+    Bad(why: "bad Huffman code in deflate stream")
+
+fn Bits.codes(mut self, mut out List[int], lit Huff, dist Huff) ! PdfError
+    while true
+        sym := decode(lit)?
+        if sym < 256
+            out.push(sym)
+        elif sym == 256
+            return
+        else
+            s := sym - 257
+            if s >= 29
+                return Bad(why: "bad length code in deflate stream")
+            n := LEN_BASE[s] + bits(LEN_EXTRA[s])?
+            ds := decode(dist)?
+            if ds >= 30
+                return Bad(why: "bad distance code in deflate stream")
+            d := DIST_BASE[ds] + bits(DIST_EXTRA[ds])?
+            if d > out.len()
+                return Bad(why: "deflate distance before the start")
+            start := out.len() - d
+            for i in 0..n
+                out.push(out[start + i])
+
+fn Bits.dynamic(mut self, mut out List[int]) ! PdfError
+    nlen := bits(5)? + 257
+    ndist := bits(5)? + 1
+    ncode := bits(4)? + 4
+    mut cl := [0 for _ in 0..19]
+    for i in 0..ncode
+        cl[CL_ORDER[i]] = bits(3)?
+    ch := huff(cl)
+    mut lengths := List[int]()
+    while lengths.len() < nlen + ndist
+        sym := decode(ch)?
+        if sym < 16
+            lengths.push(sym)
+        else
+            mut rep := 0
+            mut val := 0
+            if sym == 16
+                prev := lengths.last() else return Bad(why: "deflate repeat with no previous length")
+                val = prev
+                rep = 3 + bits(2)?
+            elif sym == 17
+                rep = 3 + bits(3)?
+            else
+                rep = 11 + bits(7)?
+            for _ in 0..rep
+                lengths.push(val)
+    if lengths.len() > nlen + ndist
+        return Bad(why: "deflate code lengths overrun")
+    codes(mut out, huff(lengths[..nlen]), huff(lengths[nlen..]))?
+
+## Inflates raw deflate data from `start` into `out` (RFC 1951 3.2.3).
+fn inflate_into(data List[int], start int, mut out List[int]) ! PdfError
+    mut b := Bits(data: data, pos: start, buf: 0, cnt: 0)
+    while true
+        last := b.bits(1)?
+        kind := b.bits(2)?
+        if kind == 0
+            b.buf = 0
+            b.cnt = 0
+            if b.pos + 4 > data.len()
+                return Bad(why: "stored deflate block ends early")
+            n := data[b.pos] + data[b.pos + 1] * 256
+            b.pos += 4
+            if b.pos + n > data.len()
+                return Bad(why: "stored deflate block ends early")
+            out.extend(data[b.pos..b.pos + n])
+            b.pos += n
+        elif kind == 1
+            b.codes(mut out, FIXED_LIT, FIXED_DIST)?
+        elif kind == 2
+            b.dynamic(mut out)?
+        else
+            return Bad(why: "deflate block type 3")
+        if last == 1
+            return
+
+## Inflates a zlib stream (RFC 1950): a 2-byte header, deflate data, and an
+## Adler-32 trailer, which is not checked. On a damaged stream it keeps what
+## decoded before the damage, as PDF readers do, and fails only if nothing
+## decoded.
+pub fn inflate_zlib(data List[int]) List[int] ! PdfError
+    mut start := 0
+    if data.len() >= 2 and data[0].bit_and(15) == 8 and (data[0] * 256 + data[1]) % 31 == 0
+        start = 2
+    mut out := List[int]()
+    inflate_into(data, start, mut out) else err
+        if out.len() == 0
+            return err
+    out
+
+@test fn inflates_stored_and_fixed_blocks() !
+    # "hello" compressed by zlib at level 0 (stored) and level 6 (fixed).
+    stored := [120, 1, 1, 5, 0, 250, 255, 104, 101, 108, 108, 111, 6, 44, 2, 21]
+    assert_eq(inflate_zlib(stored)?, ascii("hello"))
+    fixed := [120, 156, 203, 72, 205, 201, 201, 7, 0, 6, 44, 2, 21]
+    assert_eq(inflate_zlib(fixed)?, ascii("hello"))
+
+@test fn inflates_back_references() !
+    # "abcabcabcabcabcabc" at level 9: one literal run, then a copy.
+    z := [120, 218, 75, 76, 74, 78, 68, 69, 0, 65, 124, 6, 229]
+    assert_eq(latin1(inflate_zlib(z)?), "abcabcabcabcabcabc")
+
+@test fn rejects_garbage()
+    got := inflate_zlib([120, 156, 255, 255, 255]) else []
+    assert_eq(got.len(), 0)

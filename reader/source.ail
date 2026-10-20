@@ -1,0 +1,81 @@
+## The bytes of a PDF, and the error every reader function fails with.
+##
+## A byte is an `int` in 0..=255 and a byte string is a `List[int]` until
+## AIL has a `bytes` type (lane 123, ADRs 0412-0417). `read_file` is the
+## one stopgap (ADR 0520): it reads through POSIX `od`, because `std.fs`
+## reads text only. It becomes `fs.read_bytes` when that lands.
+
+use std.proc
+use std.fs
+
+pub error enum PdfError
+    Bad(why str) "not a readable PDF: {why}"
+    Unsupported(what str) "not supported yet: {what}"
+    Encrypted "the PDF is encrypted; decryption is not supported yet"
+    ## A file that can't be read, or a command line that is wrong.
+    Io(why str) "{why}"
+
+## Reads a whole file as bytes (stopgap through `od`, ADR 0520).
+pub fn read_file(path str) List[int] ! PdfError
+    if not fs.exists(path)
+        return Io(why: "no such file: {path}")
+    r := proc.run("od", ["-An", "-v", "-tu1", path]) else err
+        return Io(why: "can't run od to read {path}: {err}")
+    if r.status != 0
+        return Io(why: "od failed on {path}: {r.err.trim()}")
+    mut out := List[int]()
+    for line in r.out.lines()
+        for w in line.split(" ")
+            if w != ""
+                out.push(w.to_int() else 0)
+    out
+
+## Bytes of an ASCII or Latin-1 string, one per character.
+pub fn ascii(s str) List[int]
+    [c.code() for c in s.chars()]
+
+## A byte string as text, one character per byte (Latin-1).
+pub fn latin1(b List[int]) str
+    [chr(x) for x in b].join("")
+
+## The character with code `n`; U+FFFD for a code that isn't one.
+pub fn chr(n int) char
+    char.from_code(n) else '\u{fffd}'
+
+## Whether `pat` occurs in `b` at `at`.
+pub fn bytes_at(b List[int], at int, pat List[int]) bool
+    if at < 0 or at + pat.len() > b.len()
+        return false
+    for i in 0..pat.len()
+        if b[at + i] != pat[i]
+            return false
+    true
+
+## The last start of `pat` in `b` at or before `before`, if any.
+pub fn rfind(b List[int], pat List[int], before int) int?
+    mut i := before.min(b.len() - pat.len())
+    while i >= 0
+        if bytes_at(b, i, pat)
+            return i
+        i -= 1
+    none
+
+## The first start of `pat` in `b` at or after `from`, if any.
+pub fn find_from(b List[int], pat List[int], from int) int?
+    if pat.len() == 0
+        return from
+    first := pat[0]
+    mut i := from.max(0)
+    last := b.len() - pat.len()
+    while i <= last
+        if b[i] == first and bytes_at(b, i, pat)
+            return i
+        i += 1
+    none
+
+@test fn finds_byte_patterns()
+    b := ascii("abc startxref 12 startxref 9")
+    assert_eq(rfind(b, ascii("startxref"), b.len()), 17)
+    assert_eq(find_from(b, ascii("startxref"), 5), 17)
+    assert_eq(find_from(b, ascii("nope"), 0), none)
+    assert_eq(latin1(ascii("caf\u{e9}")), "caf\u{e9}")

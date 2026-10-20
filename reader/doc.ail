@@ -1,0 +1,318 @@
+## A PDF document: the cross-reference table, the trailer, indirect objects
+## and stream data (ISO 32000-2 section 7.5).
+##
+## Reading follows `startxref` to classic tables and cross-reference
+## streams (7.5.4, 7.5.8), oldest `/Prev` last, so newer updates win
+## (7.5.6). If that fails, the file is scanned for `N G obj` headers, as
+## readers do for damaged files.
+
+## Where an object lives: `kind` 1 is a file offset `a`; kind 2 is entry
+## `b` of object stream `a` (7.5.8.3).
+pub struct XRef
+    kind int
+    a int
+    b int
+
+struct Cache
+    objs Map[int, Obj]
+
+pub struct Doc
+    pub buf List[int]
+    xref Map[int, XRef]
+    pub trailer Map[str, Obj]
+    cache ref Cache
+    ## Whether the cross-reference data was rebuilt by scanning.
+    pub repaired bool
+
+## Opens a PDF from its bytes.
+pub fn Doc.open(buf List[int]) Doc ! PdfError
+    if find_from(buf[..buf.len().min(1024)], ascii("%PDF-"), 0) == none
+        return Bad(why: "no %PDF- header")
+    mut d := Doc(buf: buf, xref: {}, trailer: {}, cache: ref Cache(objs: {}), repaired: false)
+    ok := d.read_xref_chain() else false
+    if not ok or not d.trailer.contains("Root")
+        d.rebuild()
+    if not d.trailer.contains("Root")
+        return Bad(why: "no document catalog (/Root)")
+    if d.trailer.contains("Encrypt")
+        return Encrypted
+    d
+
+fn Doc.read_xref_chain(mut self) bool ! PdfError
+    sx := rfind(buf, ascii("startxref"), buf.len()) else return false
+    mut l := Lexer.new(buf, sx + 9)
+    mut off := (l.object(false)?).as_int() else return false
+    mut seen := Set[int]()
+    while off >= 0 and seen.add(off)
+        if off >= buf.len()
+            return false
+        mut prev := -1
+        mut x := Lexer.new(buf, off)
+        x.skip_ws()
+        if bytes_at(buf, x.pos, ascii("xref"))
+            x.pos += 4
+            t := read_table(mut x)?
+            xs := t.get("XRefStm")?.as_int() else -1
+            if xs >= 0
+                read_xref_stream(xs)?
+            prev = t.get("Prev")?.as_int() else -1
+            merge_trailer(t)
+        else
+            t := read_xref_stream(off)?
+            prev = t.get("Prev")?.as_int() else -1
+            merge_trailer(t)
+        off = prev
+    true
+
+fn Doc.merge_trailer(mut self, t Map[str, Obj])
+    for k in t.keys()
+        if not trailer.contains(k)
+            trailer[k] = t[k]
+
+fn Doc.add(mut self, num int, e XRef)
+    if not xref.contains(num)
+        xref[num] = e
+
+## A classic table and the trailer after it (7.5.4, 7.5.5).
+fn Doc.read_table(mut self, mut x Lexer) Map[str, Obj] ! PdfError
+    while true
+        t := x.token() else return Bad(why: "cross-reference table ends early")
+        if t.as_op() == "trailer"
+            return (x.object(true)?).as_dict() else return Bad(why: "trailer is not a dictionary")
+        first := t.as_int() else return Bad(why: "bad cross-reference subsection")
+        count := (x.object(false)?).as_int() else return Bad(why: "bad cross-reference subsection")
+        for i in 0..count
+            o := (x.object(false)?).as_int() else return Bad(why: "bad cross-reference entry")
+            g := (x.object(false)?).as_int() else return Bad(why: "bad cross-reference entry")
+            kind := (x.token() else Obj.Null).as_op() else ""
+            if kind == "n" and o > 0
+                add(first + i, XRef(kind: 1, a: o, b: g))
+            elif kind == "f"
+                add(first + i, XRef(kind: 0, a: 0, b: 0))
+    Bad(why: "unreachable")
+
+## A cross-reference stream at `off` (7.5.8); its dictionary is a trailer.
+fn Doc.read_xref_stream(mut self, off int) Map[str, Obj] ! PdfError
+    o := object_at(off)?
+    d := o.as_dict() else return Bad(why: "no cross-reference data at {off}")
+    if (d.get("Type")?.as_name() else "") != "XRef"
+        return Bad(why: "object at {off} is not a cross-reference stream")
+    data := stream_data(o)?
+    w := [x.as_int() else 0 for x in (d.get("W")?.as_arr() else [])]
+    if w.len() != 3
+        return Bad(why: "bad /W in cross-reference stream")
+    size := d.get("Size")?.as_int() else 0
+    idx := [
+        x.as_int() else 0
+        for x in (d.get("Index")?.as_arr() else [Obj.Int(n: 0), Obj.Int(n: size)])
+    ]
+    row := w[0] + w[1] + w[2]
+    mut p := 0
+    mut k := 0
+    while k + 1 < idx.len()
+        for i in 0..idx[k + 1]
+            if p + row > data.len()
+                return d
+            kind := if w[0] == 0 then 1 else field(data, p, w[0])
+            a := field(data, p + w[0], w[1])
+            b := field(data, p + w[0] + w[1], w[2])
+            p += row
+            if kind == 1 or kind == 2
+                add(idx[k] + i, XRef(kind: kind, a: a, b: b))
+            elif kind == 0
+                add(idx[k] + i, XRef(kind: 0, a: 0, b: 0))
+        k += 2
+    d
+
+fn field(data List[int], at int, n int) int
+    mut v := 0
+    for i in 0..n
+        v = v * 256 + data[at + i]
+    v
+
+## Rebuilds the table by scanning for `N G obj` and trailers.
+fn Doc.rebuild(mut self)
+    repaired = true
+    xref = {}
+    obj := ascii("obj")
+    mut i := find_from(buf, obj, 0) else -1
+    while i >= 0
+        if hdr := object_header_before(buf, i)
+            xref[hdr[0]] = XRef(kind: 1, a: hdr[1], b: 0)
+        i = find_from(buf, obj, i + 3) else -1
+    mut t := find_from(buf, ascii("trailer"), 0) else -1
+    while t >= 0
+        mut l := Lexer.new(buf, t + 7)
+        o := l.object(true) else Obj.Null
+        if d := o.as_dict()
+            for k in d.keys()
+                trailer[k] = d[k]
+        t = find_from(buf, ascii("trailer"), t + 7) else -1
+    if not trailer.contains("Root")
+        for num in xref.keys()
+            o := get(num) else Obj.Null
+            if ((o.as_dict() else {}).get("Type")?.as_name() else "") == "Catalog"
+                trailer["Root"] = Obj.Ref(num: num, gen: 0)
+                break
+
+## `[num, offset]` when `obj` at `i` follows `num gen` at a line start.
+fn object_header_before(buf List[int], i int) List[int]?
+    mut p := i - 1
+    while p >= 0 and is_white(buf[p])
+        p -= 1
+    mut q := p
+    while q >= 0 and buf[q] >= 48 and buf[q] <= 57
+        q -= 1
+    if q == p
+        return none
+    while q >= 0 and is_white(buf[q])
+        q -= 1
+    mut r := q
+    while r >= 0 and buf[r] >= 48 and buf[r] <= 57
+        r -= 1
+    if r == q
+        return none
+    num := latin1(buf[r + 1..q + 1]).to_int() else return none
+    [num, r + 1]
+
+## The indirect object at a file offset, with stream data located.
+fn Doc.object_at(self, off int) Obj ! PdfError
+    mut l := Lexer.new(buf, off)
+    _num := l.token() else return Bad(why: "no object at {off}")
+    _gen := l.token() else return Bad(why: "no object at {off}")
+    if (l.token() else Obj.Null).as_op() != "obj"
+        return Bad(why: "no object header at {off}")
+    o := l.object(true)?
+    d := o.as_dict() else return o
+    save := l.pos
+    if (l.token() else Obj.Null).as_op() != "stream"
+        l.pos = save
+        return o
+    # The data starts after CRLF or LF (7.3.8.1).
+    mut start := l.pos
+    if start < buf.len() and buf[start] == 13
+        start += 1
+    if start < buf.len() and buf[start] == 10
+        start += 1
+    mut n := -1
+    if lo := d.get("Length")
+        n = resolve(lo).as_int() else -1
+    end := find_from(buf, ascii("endstream"), start) else buf.len()
+    if n < 0 or start + n > buf.len() or not near_endstream(buf, start + n)
+        # A wrong /Length is common; trust `endstream`, less its EOL.
+        mut e := end
+        if e > start and buf[e - 1] == 10
+            e -= 1
+        if e > start and buf[e - 1] == 13
+            e -= 1
+        n = e - start
+    Obj.Stream(d: d, start: start, len: n)
+
+fn near_endstream(buf List[int], at int) bool
+    mut p := at
+    while p < buf.len() and p < at + 4 and is_white(buf[p])
+        p += 1
+    bytes_at(buf, p, ascii("endstream"))
+
+## Object `num`, or `Null` when it doesn't exist (7.3.10).
+pub fn Doc.get(self, num int) Obj ! PdfError
+    if o := cache.objs.get(num)
+        return o
+    e := xref.get(num) else return Obj.Null
+    if e.kind == 1
+        o := object_at(e.a)?
+        cache.objs[num] = o
+        return o
+    if e.kind == 2
+        load_object_stream(e.a)?
+        return cache.objs.get(num) else Obj.Null
+    Obj.Null
+
+## Reads every object of an object stream into the cache (7.5.7).
+fn Doc.load_object_stream(self, snum int) ! PdfError
+    s := get(snum)?
+    d := s.as_dict() else return Bad(why: "object stream {snum} is missing")
+    data := stream_data(s)?
+    n := d.get("N")?.as_int() else 0
+    first := d.get("First")?.as_int() else 0
+    mut l := Lexer.new(data, 0)
+    mut heads := List[int]()
+    for _ in 0..n * 2
+        heads.push((l.object(false)?).as_int() else 0)
+    for i in 0..n
+        num := heads[i * 2]
+        if not cache.objs.contains(num) and (xref.get(num)?.a else -1) == snum
+            mut o := Lexer.new(data, first + heads[i * 2 + 1])
+            cache.objs[num] = o.object(true)?
+
+## `o`, or the object it refers to; a missing object is `Null`.
+pub fn Doc.resolve(self, o Obj) Obj
+    if num := o.as_ref()
+        return get(num) else Obj.Null
+    o
+
+## A dictionary entry, resolved; `Null` when absent.
+pub fn Doc.key(self, d Map[str, Obj], k str) Obj
+    resolve(d.get(k) else Obj.Null)
+
+## The decoded data of a stream (7.4).
+pub fn Doc.stream_data(self, o Obj) List[int] ! PdfError
+    match o
+        Stream(d, start, n) =>
+            mut data := buf[start..(start + n).min(buf.len())]
+            filters := key(d, "Filter")
+            parms := key(d, "DecodeParms")
+            mut names := List[str]()
+            mut ps := List[Obj]()
+            if f := filters.as_name()
+                names.push(f)
+                ps.push(parms)
+            elif fs := filters.as_arr()
+                for i in 0..fs.len()
+                    names.push(resolve(fs[i]).as_name() else "")
+                    pa := parms.as_arr() else []
+                    ps.push(if i < pa.len() then resolve(pa[i]) else Obj.Null)
+            for i in 0..names.len()
+                data = decode_filter(names[i], data, (resolve(ps[i]).as_dict() else {}))?
+            data
+        Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Op => Bad(why: "not a stream")
+
+## The catalog's page objects in order, with inherited attributes
+## (7.7.3.3, 7.7.3.4).
+pub fn Doc.pages(self) List[Map[str, Obj]] ! PdfError
+    root := key(trailer, "Root").as_dict() else return Bad(why: "the catalog is not a dictionary")
+    mut out := List[Map[str, Obj]]()
+    mut seen := Set[int]()
+    walk_pages(root.get("Pages") else Obj.Null, {}, mut out, mut seen, 0)?
+    out
+
+fn Doc.walk_pages(
+    self,
+    node Obj,
+    inherit Map[str, Obj],
+    mut out List[Map[str, Obj]],
+    mut seen Set[int],
+    depth int,
+) ! PdfError
+    if depth > 64
+        return
+    if num := node.as_ref()
+        if not seen.add(num)
+            return
+    d := resolve(node).as_dict() else return
+    mut inh := inherit
+    for k in ["Resources", "MediaBox", "CropBox", "Rotate"]
+        if v := d.get(k)
+            inh[k] = v
+    kids := key(d, "Kids").as_arr()
+    if kids == none or key(d, "Type").as_name() == "Page"
+        mut page := d
+        if num := node.as_ref()
+            page["_num"] = Obj.Int(n: num)
+        for k in inh.keys()
+            if not page.contains(k)
+                page[k] = inh[k]
+        out.push(page)
+        return
+    for kid in kids else []
+        walk_pages(kid, inh, mut out, mut seen, depth + 1)?

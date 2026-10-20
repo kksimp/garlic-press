@@ -1,0 +1,221 @@
+## pdf: read, search and view PDFs by their text layer, written in AIL
+## (ADR 0520). No OCR: text comes from the fonts' own maps to Unicode.
+##
+##     ail run tools/pdf/pdf.ail text FILE [--page N]
+##     ail run tools/pdf/pdf.ail grep [--case] [--json] PATTERN FILE...
+##     ail run tools/pdf/pdf.ail json FILE [--page N]
+##     ail run tools/pdf/pdf.ail info FILE
+##     ail run tools/pdf/pdf.ail outline FILE
+##     ail run tools/pdf/pdf.ail bench FILE
+##     ail run tools/pdf/pdf.ail view FILE [--page N] [--find TEXT] [--print] [--cols N]
+
+use std.env
+use std.io
+use std.time
+use reader
+use view
+
+USAGE := """
+    usage: pdf COMMAND ...
+      text FILE [--page N]                  the text, pages split by form feeds
+      grep [--case] [--json] PATTERN FILE...  FILE:PAGE: line, for each line with a hit
+      json FILE [--page N]                  the page model: lines, boxes, links, outline
+      info FILE                             pages, metadata, and what could not be read
+      outline FILE                          the bookmarks, with their pages
+      bench FILE                            the time each stage of reading takes
+      view FILE [--page N] [--find TEXT] [--print] [--cols N]
+                                            the text layer in a window; --print shows it here
+    """
+
+struct Args
+    words List[str]
+    flags Map[str, str]
+
+## Words and `--flag [value]` options; `--case`, `--json` and `--print`
+## take no value.
+fn parse_args(raw List[str]) Args
+    bare := {"--case", "--json", "--print"}
+    mut a := Args(words: [], flags: {})
+    mut i := 0
+    while i < raw.len()
+        w := raw[i]
+        if w.starts_with("--")
+            if bare.contains(w) or i + 1 >= raw.len()
+                a.flags[w] = ""
+            else
+                a.flags[w] = raw[i + 1]
+                i += 1
+        else
+            a.words.push(w)
+        i += 1
+    a
+
+fn Args.word(self, i int) str?
+    if i < words.len() then words[i] else none
+
+fn open_doc(path str) reader.Doc ! reader.PdfError
+    reader.Doc.open(reader.read_file(path)?)
+
+## The pages `--page` picks: all of them, or one.
+fn chosen(doc reader.Doc, a Args) List[reader.Page] ! reader.PdfError
+    all := doc.read_pages()?
+    p := a.flags.get("--page") else return all
+    n := p.to_int() else return reader.PdfError.Io(why: "--page needs a number, got {p}")
+    if n < 1 or n > all.len()
+        return reader.PdfError.Io(why: "no page {n}; the document has {all.len()}")
+    [all[n - 1]]
+
+fn text_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "text needs a FILE")
+    pages := chosen(open_doc(path)?, a)?
+    for i in 0..pages.len()
+        if i > 0
+            print("\u{c}")
+        for l in pages[i].lines
+            print(l.text)
+
+fn grep_cmd(a Args) bool ! reader.PdfError
+    pattern := a.word(1) else return reader.PdfError.Io(why: "grep needs a PATTERN")
+    files := a.words[2..]
+    if files.len() == 0
+        return reader.PdfError.Io(why: "grep needs a FILE")
+    case := a.flags.contains("--case")
+    mut found := false
+    for path in files
+        doc := open_doc(path) else err
+            io.eprint("pdf: {path}: {err}")
+            continue
+        for p in doc.read_pages()?
+            hits := reader.search_page(p, pattern, case)
+            mut last := -1
+            for h in hits
+                found = true
+                if a.flags.contains("--json")
+                    mut j := h.to_json()
+                    j.set("file", Json.Str(path))
+                    print(j.to_text())
+                elif h.line != last
+                    prefix := if files.len() > 1 then "{path}:" else ""
+                    print("{prefix}{h.page}: {h.text}")
+                    last = h.line
+    found
+
+fn json_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "json needs a FILE")
+    doc := open_doc(path)?
+    pages := chosen(doc, a)?
+    mut members := List[JsonMember]()
+    members.push(JsonMember(key: "file", value: Json.Str(path)))
+    members.push(JsonMember(key: "info", value: info_json(doc)))
+    members.push(JsonMember(key: "pages", value: Json.Arr([p.model.to_json() for p in pages])))
+    members.push(JsonMember(key: "outline", value: Json.Arr([o.to_json() for o in doc.outline()])))
+    print(Json.Obj(members).to_text())
+
+fn info_json(doc reader.Doc) Json
+    mut members := List[JsonMember]()
+    info := doc.key(doc.trailer, "Info").as_dict() else {}
+    for k in ["Title", "Author", "Subject", "Creator", "Producer"]
+        if b := doc.key(info, k).as_bytes()
+            members.push(JsonMember(key: k.to_lower(), value: Json.Str(reader.text_string(b))))
+    Json.Obj(members)
+
+fn info_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "info needs a FILE")
+    doc := open_doc(path)?
+    pages := doc.read_pages()?
+    print("file: {path}")
+    print("version: {reader.latin1(doc.buf[5..8.min(doc.buf.len())])}")
+    for m in (info_json(doc).as_obj() else [])
+        print("{m.key}: {m.value.as_str() else ""}")
+    print("pages: {pages.len()}")
+    mut lines := 0
+    mut unreadable := 0
+    mut scans := List[int]()
+    for p in pages
+        lines += p.model.lines.len()
+        unreadable += p.model.unreadable
+        if p.model.image_only
+            scans.push(p.model.page)
+    print("text lines: {lines}")
+    print("glyphs without text: {unreadable}")
+    if scans.len() > 0
+        print("image-only pages (scans; these need OCR): {scans.join(", ")}")
+    if doc.repaired
+        print("note: the cross-reference table was damaged and rebuilt by scanning")
+
+fn outline_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "outline needs a FILE")
+    for o in open_doc(path)?.outline()
+        page := if p := o.page then "{p}" else "-"
+        print("{"  ".repeat(o.depth)}{o.title}  ({page})")
+
+## `bench`: milliseconds for each stage, to track the reader's speed.
+fn bench_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "bench needs a FILE")
+    t0 := time.now_ms()
+    buf := reader.read_file(path)?
+    t1 := time.now_ms()
+    doc := reader.Doc.open(buf)?
+    t2 := time.now_ms()
+    pages := doc.read_pages()?
+    t3 := time.now_ms()
+    mut hits := 0
+    for p in pages
+        hits += reader.search_page(p, "the", false).len()
+    t4 := time.now_ms()
+    mut lines := 0
+    for p in pages
+        lines += p.lines.len()
+    print("{path}: {buf.len()} bytes, {pages.len()} pages, {lines} lines")
+    print("read {t1 - t0} ms, open {t2 - t1} ms, pages {t3 - t2} ms, search \"the\" {t4 - t3} ms ({hits} hits)")
+
+fn main()
+    a := parse_args(env.args())
+    cmd := a.words.first() else ""
+    mut ok := true
+    if cmd == "text"
+        text_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "grep"
+        found := grep_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+            false
+        ok = found
+    elif cmd == "json"
+        json_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "info"
+        info_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "bench"
+        bench_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "outline"
+        outline_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "view"
+        path := a.word(1) else ""
+        if path == ""
+            io.eprint("pdf: view needs a FILE")
+            io.exit(2)
+        doc := open_doc(path) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+            return
+        pages := doc.read_pages() else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+            return
+        view.start(path, pages, a.flags)
+    else
+        print(USAGE)
+        if cmd != "" and cmd != "help"
+            io.exit(2)
+    if not ok
+        io.exit(1)

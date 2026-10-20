@@ -1,0 +1,11 @@
+Field report on café finances
+The office tracks every invoice. Efficient filing of the final figures matters, and the official total for the
+fiscal year was 12,345.67 euros — up from last year.
+See the ledger for details. Naïve readers should note the résumé section.
+Second section
+Searching a PDF without OCR works because the text is already inside the file. This paragraph is long
+enough to wrap onto more than one line in the rendered document, so that search across a line break can
+be tested properly with a phrase that spans it.
+
+Appendix
+The appendix sits on its own page. Unicode: αβγ and → arrows.

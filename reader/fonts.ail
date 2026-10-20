@@ -1,0 +1,507 @@
+## Fonts as the text layer needs them: how a shown string splits into
+## codes, what Unicode text each code is, and how wide its glyph is
+## (ISO 32000-2 section 9.5-9.10).
+##
+## Text comes from, in order: the font's `/ToUnicode` CMap (9.10.3); for a
+## simple font, the glyph name its encoding gives the code (9.6.5, 9.10.2);
+## else nothing, and the glyph is counted so a caller can report it. The
+## encoding tables are the facts of ISO 32000-2 Annex D.
+
+pub struct Font
+    pub name str
+    ## Bytes per code when the font has no codespace ranges: 2 for Type0.
+    width_bytes int
+    ## Codespace ranges `[bytes, lo, hi]` from the CMaps (9.7.6.2).
+    space List[List[int]]
+    uni Map[int, str]
+    ranges List[UniRange]
+    names Map[int, str]
+    widths Map[int, float]
+    default_w float
+    ## Type3 glyph space to text space (9.6.4); 0.001 for the others.
+    scale float
+    pub has_unicode bool
+    ## Every code the font maps, decoded once (`prepare`).
+    memo Map[int, Code]
+    ## The same for a one-byte font, by code.
+    table List[Code]
+
+## `lo..=hi` maps to `dst`, then `dst` with its last unit plus one per code.
+struct UniRange
+    lo int
+    hi int
+    dst List[int]
+
+## One shown code: its text, its width in text space (font size 1), and
+## whether it is the single-byte code 32, which word spacing applies to.
+pub struct Code
+    pub text str
+    pub w float
+    pub space bool
+    pub known bool
+
+## Glyph names in WinAnsiEncoding order from code 32 (Annex D.2); `-` is
+## no glyph.
+WIN_NAMES := words("""
+    space exclam quotedbl numbersign dollar percent ampersand quotesingle parenleft parenright asterisk
+    plus comma hyphen period slash zero one two three four five six seven eight nine colon semicolon
+    less equal greater question at A B C D E F G H I J K L M N O P Q R S T U V W X Y Z bracketleft
+    backslash bracketright asciicircum underscore grave a b c d e f g h i j k l m n o p q r s t u v w
+    x y z braceleft bar braceright asciitilde bullet Euro bullet quotesinglbase florin quotedblbase
+    ellipsis dagger daggerdbl circumflex perthousand Scaron guilsinglleft OE bullet Zcaron bullet
+    bullet quoteleft quoteright quotedblleft quotedblright bullet endash emdash tilde trademark scaron
+    guilsinglright oe bullet zcaron Ydieresis space exclamdown cent sterling currency yen brokenbar
+    section dieresis copyright ordfeminine guillemotleft logicalnot hyphen registered macron degree
+    plusminus twosuperior threesuperior acute mu paragraph periodcentered cedilla onesuperior
+    ordmasculine guillemotright onequarter onehalf threequarters questiondown Agrave Aacute
+    Acircumflex Atilde Adieresis Aring AE Ccedilla Egrave Eacute Ecircumflex Edieresis Igrave Iacute
+    Icircumflex Idieresis Eth Ntilde Ograve Oacute Ocircumflex Otilde Odieresis multiply Oslash
+    Ugrave Uacute Ucircumflex Udieresis Yacute Thorn germandbls agrave aacute acircumflex atilde
+    adieresis aring ae ccedilla egrave eacute ecircumflex edieresis igrave iacute icircumflex
+    idieresis eth ntilde ograve oacute ocircumflex otilde odieresis divide oslash ugrave uacute
+    ucircumflex udieresis yacute thorn ydieresis
+    """)
+
+## Unicode of WinAnsiEncoding codes 128..159 (the rest is Latin-1).
+WIN_HIGH := [
+    0x20ac,
+    0x2022,
+    0x201a,
+    0x0192,
+    0x201e,
+    0x2026,
+    0x2020,
+    0x2021,
+    0x02c6,
+    0x2030,
+    0x0160,
+    0x2039,
+    0x0152,
+    0x2022,
+    0x017d,
+    0x2022,
+    0x2022,
+    0x2018,
+    0x2019,
+    0x201c,
+    0x201d,
+    0x2022,
+    0x2013,
+    0x2014,
+    0x02dc,
+    0x2122,
+    0x0161,
+    0x203a,
+    0x0153,
+    0x2022,
+    0x017e,
+    0x0178,
+]
+
+## StandardEncoding codes from 161 that differ from WinAnsiEncoding
+## (Annex D.2); 32..126 match it but for 39 and 96.
+STD_HIGH := words("""
+    161 exclamdown 162 cent 163 sterling 164 fraction 165 yen 166 florin 167 section 168 currency
+    169 quotesingle 170 quotedblleft 171 guillemotleft 172 guilsinglleft 173 guilsinglright 174 fi
+    175 fl 177 endash 178 dagger 179 daggerdbl 180 periodcentered 182 paragraph 183 bullet
+    184 quotesinglbase 185 quotedblbase 186 quotedblright 187 guillemotright 188 ellipsis
+    189 perthousand 191 questiondown 193 grave 194 acute 195 circumflex 196 tilde 197 macron
+    198 breve 199 dotaccent 200 dieresis 202 ring 203 cedilla 205 hungarumlaut 206 ogonek
+    207 caron 208 emdash 225 AE 227 ordfeminine 232 Lslash 233 Oslash 234 OE 235 ordmasculine
+    241 ae 245 dotlessi 248 lslash 249 oslash 250 oe 251 germandbls
+    """)
+
+## Glyph names outside WinAnsiEncoding, with their Unicode.
+EXTRA_NAMES := {
+    "fi": 0xfb01,
+    "fl": 0xfb02,
+    "ff": 0xfb00,
+    "ffi": 0xfb03,
+    "ffl": 0xfb04,
+    "dotlessi": 0x0131,
+    "minus": 0x2212,
+    "fraction": 0x2044,
+    "Lslash": 0x0141,
+    "lslash": 0x0142,
+    "breve": 0x02d8,
+    "dotaccent": 0x02d9,
+    "ring": 0x02da,
+    "ogonek": 0x02db,
+    "caron": 0x02c7,
+    "hungarumlaut": 0x02dd,
+    "nbspace": 0xa0,
+    "sfthyphen": 0xad,
+    "nonbreakingspace": 0xa0,
+    "periodcentered": 0xb7,
+    "quotesingle": 0x27,
+    "grave": 0x60,
+    "Delta": 0x2206,
+    "Omega": 0x2126,
+    "mu": 0xb5,
+    "lessequal": 0x2264,
+    "greaterequal": 0x2265,
+    "notequal": 0x2260,
+    "infinity": 0x221e,
+    "partialdiff": 0x2202,
+    "summation": 0x2211,
+    "product": 0x220f,
+    "pi": 0x03c0,
+    "radical": 0x221a,
+    "integral": 0x222b,
+    "approxequal": 0x2248,
+    "lozenge": 0x25ca,
+    "apple": 0xf8ff,
+}
+
+NAME_UNI := name_table()
+
+fn words(s str) List[str]
+    [w for w in s.replace("\n", " ").split(" ") if w != ""]
+
+fn hex_int(s str) int?
+    if s == ""
+        return none
+    mut v := 0
+    for c in s.chars()
+        v = v * 16 + c.to_digit(16)?
+    v
+
+fn name_table() Map[str, int]
+    mut m := Map[str, int]()
+    for i in 0..WIN_NAMES.len()
+        code := i + 32
+        n := WIN_NAMES[i]
+        if not m.contains(n)
+            m[n] = if code >= 128 and code < 160 then WIN_HIGH[code - 128] else code
+    m["bullet"] = 0x2022
+    m["space"] = 32
+    m["hyphen"] = 45
+    for k in EXTRA_NAMES.keys()
+        m[k] = EXTRA_NAMES[k]
+    m
+
+## The encoding a base name gives: code to glyph name (9.6.5).
+fn base_encoding(name str) Map[int, str]
+    mut m := Map[int, str]()
+    for i in 0..WIN_NAMES.len()
+        m[i + 32] = WIN_NAMES[i]
+    if name == "StandardEncoding"
+        m[39] = "quoteright"
+        m[96] = "quoteleft"
+        for c in 127..256
+            m.remove(c)
+        mut i := 0
+        while i + 1 < STD_HIGH.len()
+            c := STD_HIGH[i].to_int() else 0
+            m[c] = STD_HIGH[i + 1]
+            i += 2
+    m
+
+## The Unicode text of a glyph name: the tables, `uniXXXX`, `uXXXX[XX]`,
+## and a base before `.` or `_` (9.10.2, the glyph list conventions).
+pub fn glyph_text(name str) str?
+    if c := NAME_UNI.get(name)
+        return chr(c).to_str()
+    if name.starts_with("uni") and name.chars().len() >= 7
+        mut out := List[char]()
+        cs := name.chars()
+        mut i := 3
+        while i + 4 <= cs.len()
+            v := hex_int(cs[i..i + 4].join("")) else return none
+            out.push(chr(v))
+            i += 4
+        return out.join("")
+    if name.starts_with("u") and name.chars().len() >= 5 and name.chars().len() <= 7
+        v := hex_int(name.slice(1, name.chars().len())) else return none
+        return chr(v).to_str()
+    if dot := name.find(".")
+        if dot > 0
+            return glyph_text(name.slice(0, dot))
+    if us := name.find("_")
+        if us > 0
+            parts := [glyph_text(p) else "" for p in name.split("_")]
+            return parts.join("")
+    none
+
+## Text from UTF-16BE units, pairing surrogates.
+pub fn utf16(units List[int]) str
+    mut out := List[char]()
+    mut i := 0
+    while i < units.len()
+        u := units[i]
+        if u >= 0xd800 and u < 0xdc00 and i + 1 < units.len()
+            lo := units[i + 1]
+            out.push(chr(0x10000 + (u - 0xd800) * 1024 + (lo - 0xdc00)))
+            i += 2
+        else
+            out.push(chr(u))
+            i += 1
+    out.join("")
+
+fn units_of(b List[int]) List[int]
+    mut u := List[int]()
+    mut i := 0
+    while i + 1 < b.len()
+        u.push(b[i] * 256 + b[i + 1])
+        i += 2
+    if b.len() % 2 == 1
+        u.push(b[b.len() - 1])
+    u
+
+fn int_of(b List[int]) int
+    mut v := 0
+    for x in b
+        v = v * 256 + x
+    v
+
+## Reads a CMap's codespace ranges and `bfchar`/`bfrange` mappings
+## (9.7.5, 9.10.3) into `f`.
+fn Font.read_cmap(mut self, data List[int])
+    mut l := Lexer.new(data, 0)
+    mut stack := List[Obj]()
+    while true
+        l.skip_ws()
+        if l.at_end()
+            break
+        o := l.object(false) else break
+        op := o.as_op() else ""
+        if op == "" or op == "[" or op == "<<"
+            stack.push(o)
+            continue
+        if op == "endcodespacerange"
+            mut i := 0
+            while i + 1 < stack.len()
+                lo := stack[i].as_bytes() else []
+                hi := stack[i + 1].as_bytes() else []
+                space.push([lo.len(), int_of(lo), int_of(hi)])
+                i += 2
+        elif op == "endbfchar"
+            mut i := 0
+            while i + 1 < stack.len()
+                src := stack[i].as_bytes() else []
+                if dst := stack[i + 1].as_bytes()
+                    uni[int_of(src)] = utf16(units_of(dst))
+                elif n := stack[i + 1].as_name()
+                    uni[int_of(src)] = glyph_text(n) else ""
+                i += 2
+        elif op == "endbfrange"
+            mut i := 0
+            while i + 2 < stack.len()
+                lo := int_of(stack[i].as_bytes() else [])
+                hi := int_of(stack[i + 1].as_bytes() else [])
+                if dst := stack[i + 2].as_bytes()
+                    ranges.push(UniRange(lo: lo, hi: hi, dst: units_of(dst)))
+                elif arr := stack[i + 2].as_arr()
+                    for k in 0..arr.len().min(hi - lo + 1)
+                        uni[lo + k] = utf16(units_of(arr[k].as_bytes() else []))
+                i += 3
+        elif op == "usecmap" or op == "endcidrange" or op == "endcidchar"
+            stack = []
+        stack = []
+        if op == "begincodespacerange" or op == "beginbfchar" or op == "beginbfrange"
+            stack = []
+
+## The font of a resource dictionary entry.
+pub fn Doc.font(self, o Obj, name str) Font ! PdfError
+    d := resolve(o).as_dict() else {}
+    subtype := key(d, "Subtype").as_name() else ""
+    mut f := Font(
+        name: key(d, "BaseFont").as_name() else name,
+        width_bytes: if subtype == "Type0" then 2 else 1,
+        space: [],
+        uni: {},
+        ranges: [],
+        names: {},
+        widths: {},
+        default_w: 0.5,
+        scale: 0.001,
+        has_unicode: false,
+        memo: {},
+        table: [],
+    )
+    tu := key(d, "ToUnicode")
+    if tu.as_dict() != none
+        data := stream_data(tu) else []
+        if data.len() > 0
+            f.read_cmap(data)
+            f.has_unicode = f.uni.len() > 0 or f.ranges.len() > 0
+    if subtype == "Type0"
+        enc := key(d, "Encoding")
+        if enc.as_dict() != none
+            data := stream_data(enc) else []
+            if data.len() > 0
+                mut cm := f
+                cm.read_cmap(data)
+                f.space = cm.space
+        desc := key(d, "DescendantFonts").as_arr() else []
+        if desc.len() > 0
+            dd := resolve(desc[0]).as_dict() else {}
+            f.default_w = (key(dd, "DW").as_num() else 1000.0) * 0.001
+            read_cid_widths(mut f, key(dd, "W").as_arr() else [])
+        f.prepare()
+        return f
+    if subtype == "Type3"
+        fm := key(d, "FontMatrix").as_arr() else []
+        if fm.len() > 0
+            f.scale = resolve(fm[0]).as_num() else 0.001
+    first := key(d, "FirstChar").as_int() else 0
+    ws := key(d, "Widths").as_arr() else []
+    for i in 0..ws.len()
+        f.widths[first + i] = (resolve(ws[i]).as_num() else 0.0) * f.scale
+    if ws.len() == 0 and f.name.contains("Courier")
+        f.default_w = 0.6
+    enc := key(d, "Encoding")
+    mut base := "StandardEncoding"
+    if subtype == "TrueType" or subtype == "Type3"
+        base = "WinAnsiEncoding"
+    if n := enc.as_name()
+        base = n
+    mut names := base_encoding(base)
+    if ed := enc.as_dict()
+        if b := key(ed, "BaseEncoding").as_name()
+            names = base_encoding(b)
+        mut code := 0
+        for x in key(ed, "Differences").as_arr() else []
+            rx := resolve(x)
+            if c := rx.as_int()
+                code = c
+            elif gn := rx.as_name()
+                names[code] = gn
+                code += 1
+    f.names = names
+    f.prepare()
+    f
+
+fn Doc.read_cid_widths(self, mut f Font, w List[Obj])
+    mut i := 0
+    while i < w.len()
+        c := resolve(w[i]).as_int() else return
+        if i + 1 >= w.len()
+            return
+        next := resolve(w[i + 1])
+        if arr := next.as_arr()
+            for k in 0..arr.len()
+                f.widths[c + k] = (resolve(arr[k]).as_num() else 0.0) * 0.001
+            i += 2
+        else
+            last := next.as_int() else return
+            if i + 2 >= w.len()
+                return
+            v := (resolve(w[i + 2]).as_num() else 0.0) * 0.001
+            if last - c <= 65536
+                for k in c..=last
+                    f.widths[k] = v
+            i += 3
+
+## The text of one code.
+fn Font.text_of(self, code int) str?
+    if t := uni.get(code)
+        return t
+    for r in ranges
+        if code >= r.lo and code <= r.hi and r.dst.len() > 0
+            mut u := r.dst
+            u[u.len() - 1] += code - r.lo
+            return utf16(u)
+    if n := names.get(code)
+        return glyph_text(n)
+    none
+
+## How many bytes the code at `b[i]` takes (9.7.6.2).
+fn Font.code_len(self, b List[int], i int) int
+    if space.len() == 0
+        return width_bytes
+    for n in 1..5
+        if i + n > b.len()
+            break
+        v := int_of(b[i..i + n])
+        for r in space
+            if r[0] == n and v >= r[1] and v <= r[2]
+                return n
+    if width_bytes <= b.len() - i then width_bytes else 1
+
+## Splits a shown string into codes (9.4.3).
+pub fn Font.codes(self, b List[int]) List[Code]
+    mut out := List[Code]()
+    mut i := 0
+    fixed := space.len() == 0
+    if fixed and width_bytes == 1 and table.len() == 256
+        for c in b
+            out.push(table[c])
+        return out
+    while i < b.len()
+        mut n := width_bytes
+        mut code := b[i]
+        if fixed and n == 2 and i + 1 < b.len()
+            code = code * 256 + b[i + 1]
+        elif not fixed or n != 1
+            n = code_len(b, i)
+            code = int_of(b[i..(i + n).min(b.len())])
+        out.push(memo.get(code) else make_code(code, n))
+        i += n
+    out
+
+fn Font.make_code(self, code int, n int) Code
+    t := text_of(code)
+    Code(
+        text: plain(t else ""),
+        w: widths.get(code) else default_w,
+        space: n == 1 and code == 32,
+        known: t != none,
+    )
+
+## Decodes every code the font maps once: all 256 for a one-byte font, and
+## the mapped and measured codes of a CID font.
+fn Font.prepare(mut self)
+    if width_bytes == 1 and space.len() == 0
+        table = [make_code(c, 1) for c in 0..256]
+        return
+    mut codes := Set[int]()
+    for c in uni.keys()
+        codes.add(c)
+    for c in widths.keys()
+        codes.add(c)
+    for r in ranges
+        if r.hi - r.lo < 4096
+            for c in r.lo..=r.hi
+                codes.add(c)
+    for c in codes
+        n := if c < 256 and width_bytes == 1 then 1 else width_bytes
+        memo[c] = make_code(c, n)
+
+@test fn maps_glyph_names()
+    assert_eq(glyph_text("A"), "A")
+    assert_eq(glyph_text("eacute"), "\u{e9}")
+    assert_eq(glyph_text("uni00410042"), "AB")
+    assert_eq(glyph_text("u1F600"), "\u{1f600}")
+    assert_eq(glyph_text("f_i"), "fi")
+    assert_eq(glyph_text("a.sc"), "a")
+    assert_eq(glyph_text("quotedblright"), "\u{201d}")
+    assert_eq(glyph_text("nope"), none)
+    assert_eq(base_encoding("StandardEncoding")[174], "fi")
+
+@test fn reads_a_to_unicode_cmap()
+    cmap := """
+        /CIDInit /ProcSet findresource begin 12 dict begin begincmap
+        1 begincodespacerange <0000> <FFFF> endcodespacerange
+        2 beginbfchar <0003> <0020> <0024> <D83DDE00> endbfchar
+        1 beginbfrange <0010> <0012> <0041> endbfrange
+        1 beginbfrange <0020> <0021> [<0066006C> <00E9>] endbfrange
+        endcmap
+        """
+    mut f := Font(
+        name: "T",
+        width_bytes: 2,
+        space: [],
+        uni: {},
+        ranges: [],
+        names: {},
+        widths: {},
+        default_w: 1.0,
+        scale: 0.001,
+        has_unicode: true,
+        memo: {},
+        table: [],
+    )
+    f.read_cmap(ascii(cmap))
+    text := [c.text for c in f.codes([0, 16, 0, 18, 0, 3, 0, 32, 0, 33, 0, 36])].join("")
+    assert_eq(text, "AC fl\u{e9}\u{1f600}")

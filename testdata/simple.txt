@@ -1,0 +1,5 @@
+Hello, PDF
+Standard fonts have no widths in the file,
+so the reader estimates them.
+Kerned words
+Café (parens) and a backslash \

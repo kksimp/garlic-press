@@ -1,0 +1,431 @@
+## The viewer: a page's text layer laid out on the window's cell grid at
+## its positions, with search (ADR 0520). The core is headless, as in the
+## editor (ADR 0181): a `Viewer` value, `on_key`, and a pure `render` to
+## runs. The window front end and `--print` both draw `render`'s runs, so
+## an agent sees exactly the cells a person sees, and `--json` describes
+## them: page, scroll, query, hits and the text on screen.
+
+use std.ui
+use std.ui.widgets
+use std.io
+use reader
+
+PAPER_BG := 0xf4f1ea
+PAPER_FG := 0x1f1f1f
+EDGE_BG := 0x3a3a3a
+BAR_BG := 0x007acc
+BAR_FG := 0xffffff
+HIT_BG := 0xffd54f
+CUR_BG := 0xff8f00
+LINK_FG := 0x1a5fb4
+
+## One laid-out page: text rows, and for each placed character which line
+## and character of the page it shows.
+pub struct Layout
+    pub rows List[str]
+    cells List[List[List[int]]]
+    pub width int
+    link_rows Map[int, bool]
+
+pub struct Viewer
+    pub path str
+    pages List[reader.Page]
+    pub page int
+    pub top int
+    pub cols int
+    pub rows int
+    pub query str
+    pub typing bool
+    pub hits List[reader.Hit]
+    pub hit int
+    pub message str
+    pub quit bool
+    layouts Map[int, Layout]
+
+pub fn Viewer.new(path str, pages List[reader.Page], cols int, rows int) Viewer
+    Viewer(
+        path: path,
+        pages: pages,
+        page: 0,
+        top: 0,
+        cols: cols,
+        rows: rows,
+        query: "",
+        typing: false,
+        hits: [],
+        hit: -1,
+        message: "",
+        quit: false,
+        layouts: {},
+    )
+
+## The median of a non-empty list.
+fn median(xs List[float]) float
+    s := xs.sorted()
+    if s.len() == 0 then 0.0 else s[s.len() / 2]
+
+## Lays a page out for `cols` columns: one cell per typical character
+## width, one row per typical line pitch, lines placed at their positions
+## and pushed down a row when they would overlap.
+pub fn layout(p reader.Page, cols int) Layout
+    lines := p.lines
+    mut sizes := List[float]()
+    for l in lines
+        sizes.push(l.size)
+    pitch := median(sizes).max(4.0) * 1.25
+    page_h := p.model.height.max(1.0)
+    page_w := p.model.width.max(1.0)
+    width := natural_width(p).min(cols).max(20)
+    scale := page_w / width.to_float()
+    mut grid := Map[int, List[char]]()
+    mut cells := Map[int, List[List[int]]]()
+    order := [i for i in 0..lines.len()].sorted(by: |i| -lines[i].y)
+    mut used := Map[int, List[List[int]]]()
+    mut link_rows := Map[int, bool]()
+    for li in order
+        l := lines[li]
+        cs := l.text.chars()
+        if cs.len() == 0
+            continue
+        mut row := ((page_h - l.y) / pitch).round().to_int().max(0)
+        c0 := (l.x / scale).round().to_int().max(0)
+        c1 := c0 + cs.len()
+        while overlaps(used.get(row) else [], c0, c1)
+            row += 1
+        used.push(row, [c0, c1])
+        if not grid.contains(row)
+            grid[row] = []
+            cells[row] = []
+        mut g := grid[row]
+        mut cl := cells[row]
+        mut col := c0
+        for ci in 0..cs.len()
+            while g.len() <= col
+                g.push(' ')
+                cl.push([-1, -1])
+            g[col] = cs[ci]
+            cl[col] = [li, ci]
+            col += 1
+        grid[row] = g
+        cells[row] = cl
+        for link in p.model.links
+            if link.rect.y0 <= l.y and link.rect.y1 >= l.y
+                link_rows[row] = true
+    mut nrows := 0
+    for r in grid.keys()
+        nrows = nrows.max(r + 1)
+    mut rows := List[str]()
+    mut all := List[List[List[int]]]()
+    for r in 0..nrows
+        rows.push((grid.get(r) else []).join(""))
+        all.push(cells.get(r) else [])
+    Layout(rows: rows, cells: all, width: width, link_rows: link_rows)
+
+## The columns a page needs for one cell per typical character.
+pub fn natural_width(p reader.Page) int
+    mut widths := List[float]()
+    for l in p.lines
+        n := l.text.chars().len()
+        if n > 1
+            widths.push((l.right() - l.x) / n.to_float())
+    cw := median(widths)
+    char_w := if cw > 0.5 then cw else 6.0
+    (p.model.width.max(1.0) / char_w).round().to_int()
+
+fn overlaps(spans List[List[int]], a int, b int) bool
+    for s in spans
+        if a < s[1] + 1 and s[0] < b + 1
+            return true
+    false
+
+fn Viewer.layout_of(mut self, i int) Layout
+    if l := layouts.get(i)
+        return l
+    l := layout(pages[i], cols - 2)
+    layouts[i] = l
+    l
+
+## Rows the page area has: the window less the title and status rows.
+fn Viewer.body_rows(self) int
+    (rows - 2).max(1)
+
+## Runs a search over every page; the first hit at or after the current
+## page becomes current.
+pub fn Viewer.find(mut self, q str)
+    query = q
+    hits = []
+    for p in pages
+        hits.extend(reader.search_page(p, q, false))
+    hit = -1
+    if hits.len() == 0
+        message = "no match for \"{q}\""
+        return
+    for i in 0..hits.len()
+        if hits[i].page - 1 >= page
+            go_hit(i)
+            return
+    go_hit(0)
+
+fn Viewer.go_hit(mut self, i int)
+    if hits.len() == 0
+        return
+    hit = (i % hits.len() + hits.len()) % hits.len()
+    h := hits[hit]
+    page = h.page - 1
+    l := layout_of(page)
+    r := row_of(l, h.line)
+    if r < top or r >= top + body_rows()
+        top = (r - body_rows() / 3).max(0)
+    message = "match {hit + 1} of {hits.len()}"
+
+fn row_of(l Layout, line int) int
+    for r in 0..l.cells.len()
+        for c in l.cells[r]
+            if c[0] == line
+                return r
+    0
+
+fn Viewer.go_page(mut self, n int)
+    page = n.max(0).min(pages.len() - 1)
+    top = 0
+
+## One key, as the window sends it (std.ui.4): `key` is a name such as
+## "a", "enter" or "pagedown".
+pub fn Viewer.on_key(mut self, key str, ctrl bool, shift bool)
+    message = ""
+    if typing
+        if key == "enter"
+            typing = false
+            find(query)
+        elif key == "escape"
+            typing = false
+        elif key == "backspace"
+            cs := query.chars()
+            query = cs[..(cs.len() - 1).max(0)].join("")
+        elif key == "space"
+            query = "{query} "
+        elif key.chars().len() == 1 and not ctrl
+            query = "{query}{if shift then key.to_upper() else key}"
+        return
+    l := layout_of(page)
+    if key == "q" or key == "escape"
+        quit = true
+    elif key == "/" or (ctrl and key == "f")
+        typing = true
+        query = ""
+    elif key == "n" and not shift
+        go_hit(hit + 1)
+    elif key == "n" and shift
+        go_hit(hit - 1)
+    elif key == "pagedown" or key == "space"
+        go_page(page + 1)
+    elif key == "pageup" or key == "backspace"
+        go_page(page - 1)
+    elif key == "down" or key == "j"
+        top = (top + 1).min((l.rows.len() - 1).max(0))
+    elif key == "up" or key == "k"
+        top = (top - 1).max(0)
+    elif key == "home"
+        go_page(0)
+    elif key == "end"
+        go_page(pages.len() - 1)
+
+## Scroll by `n` rows, from the mouse wheel.
+pub fn Viewer.scroll(mut self, n int)
+    l := layout_of(page)
+    top = (top + n).max(0).min((l.rows.len() - 1).max(0))
+
+## Whether page `pi`'s character `ci` of line `li` is in a hit; 2 for the
+## current hit.
+fn Viewer.hit_at(self, pi int, li int, ci int) int
+    for i in 0..hits.len()
+        h := hits[i]
+        if h.page - 1 != pi
+            continue
+        for s in h.spans
+            if s[0] == li and ci >= s[1] and ci < s[2]
+                return if i == hit then 2 else 1
+    0
+
+## The screen as runs: a title bar, the page on paper, and a status bar.
+pub fn Viewer.render(mut self) List[widgets.Run]
+    mut runs := List[widgets.Run]()
+    l := layout_of(page)
+    pm := pages[page].model
+    title := " {base(path)}  page {page + 1}/{pages.len()}"
+    note := if pm.image_only then "  image-only page: a scan, no text without OCR" else ""
+    runs.push(bar(0, "{title}{note}", cols))
+    body := body_rows()
+    left := ((cols - l.width) / 2).max(0)
+    for r in 0..body
+        runs.push(widgets.Run(
+            col: 0,
+            row: r + 1,
+            text: " ".repeat(cols),
+            fg: PAPER_FG,
+            bg: EDGE_BG,
+            bold: false,
+        ))
+        runs.push(widgets.Run(
+            col: left,
+            row: r + 1,
+            text: " ".repeat(l.width.min(cols)),
+            fg: PAPER_FG,
+            bg: PAPER_BG,
+            bold: false,
+        ))
+        src := top + r
+        if src >= l.rows.len()
+            continue
+        text := l.rows[src]
+        fg := if l.link_rows.contains(src) then LINK_FG else PAPER_FG
+        runs.push(widgets.Run(
+            col: left,
+            row: r + 1,
+            text: widgets.fit(text, l.width.min(cols - left)),
+            fg: fg,
+            bg: PAPER_BG,
+            bold: false,
+        ))
+        cs := text.chars()
+        cl := l.cells[src]
+        for c in 0..cs.len()
+            if c < cl.len() and cl[c][0] >= 0
+                k := hit_at(page, cl[c][0], cl[c][1])
+                if k > 0
+                    runs.push(widgets.Run(
+                        col: left + c,
+                        row: r + 1,
+                        text: cs[c].to_str(),
+                        fg: PAPER_FG,
+                        bg: if k == 2 then CUR_BG else HIT_BG,
+                        bold: false,
+                    ))
+    help := " / find   n N next/previous match   PgDn PgUp page   up down scroll   q quit"
+    status := if typing then " find: {query}_" else if message != "" then " {message}" else help
+    runs.push(bar(rows - 1, status, cols))
+    runs
+
+fn bar(row int, text str, cols int) widgets.Run
+    widgets.Run(
+        col: 0,
+        row: row,
+        text: widgets.fit(text, cols),
+        fg: BAR_FG,
+        bg: BAR_BG,
+        bold: false,
+    )
+
+fn base(path str) str
+    parts := path.split("/")
+    parts[parts.len() - 1]
+
+## What is on screen, for an agent: the page, the scroll, the query and
+## its hits, and the visible text rows.
+pub fn Viewer.state_json(mut self) Json
+    l := layout_of(page)
+    shown := [l.rows[i] for i in top..(top + body_rows()).min(l.rows.len())]
+    mut m := List[JsonMember]()
+    m.push(JsonMember(key: "file", value: Json.Str(path)))
+    m.push(JsonMember(key: "page", value: Json.Num((page + 1).to_float())))
+    m.push(JsonMember(key: "pages", value: Json.Num(pages.len().to_float())))
+    m.push(JsonMember(key: "top_row", value: Json.Num(top.to_float())))
+    m.push(JsonMember(key: "query", value: Json.Str(query)))
+    m.push(JsonMember(key: "hit", value: Json.Num((hit + 1).to_float())))
+    m.push(JsonMember(key: "hits", value: Json.Arr([h.to_json() for h in hits])))
+    m.push(JsonMember(key: "screen", value: Json.Arr([Json.Str(s) for s in shown])))
+    Json.Obj(m)
+
+fn press(spec str) List[str]
+    mut key := spec
+    mut ctrl := "0"
+    mut shift := "0"
+    if k := key.strip_prefix("ctrl+")
+        key = k
+        ctrl = "1"
+    if k := key.strip_prefix("shift+")
+        key = k
+        shift = "1"
+    [key, ctrl, shift]
+
+## The viewer from the command line: `--page N`, `--find TEXT`, then
+## `--keys "n n pagedown"`; `--print` prints the screen and `--json` its
+## state instead of opening a window.
+pub fn start(path str, pages List[reader.Page], flags Map[str, str])
+    if pages.len() == 0
+        io.eprint("pdf: {path} has no pages")
+        return
+    mut need := 20
+    for p in pages
+        need = need.max(natural_width(p) + 2)
+    cols := (flags.get("--cols") else "").to_int() else need.min(180)
+    rows := (flags.get("--rows") else "40").to_int() else 40
+    mut v := Viewer.new(path, pages, cols, rows)
+    if p := flags.get("--page")
+        v.go_page((p.to_int() else 1) - 1)
+    if q := flags.get("--find")
+        v.find(q)
+    for k in (flags.get("--keys") else "").split(" ")
+        if k != ""
+            spec := press(k)
+            v.on_key(spec[0], spec[1] == "1", spec[2] == "1")
+    if flags.contains("--json")
+        print(v.state_json().to_text())
+        return
+    if flags.contains("--print")
+        for row in widgets.text_rows(v.render(), cols, rows)
+            print(row)
+        return
+    window(mut v)
+
+fn window(mut v Viewer)
+    mut w := ui.open("pdf: {base(v.path)}", v.cols, v.rows) else err
+        io.eprint("pdf: can't open a window ({err}); try --print")
+        return
+    while not v.quit
+        w.clear(EDGE_BG)
+        widgets.draw_runs(mut w, v.render())
+        w.present()
+        match w.next_event()
+            Key(key, ctrl, _, shift) => v.on_key(key, ctrl, shift)
+            Resize(c, r) =>
+                v.cols = c
+                v.rows = r
+                v.layouts = {}
+            Close => v.quit = true
+            Scroll(n) => v.scroll(-n * 3)
+            Mouse(_, _, _, _) => continue
+    w.close()
+
+fn sample() Viewer
+    p1 := reader.text_page(1, ["Searching a PDF without", "OCR is easy."])
+    p2 := reader.text_page(2, ["Second page about OCR."])
+    Viewer.new("dir/t.pdf", [p1, p2], 60, 8)
+
+@test fn lays_text_out_at_its_positions()
+    l := layout(reader.text_page(1, ["Title", "body text here"]), 100)
+    assert_eq(l.rows[l.rows.len() - 2].trim(), "Title")
+    assert_eq(l.rows[l.rows.len() - 1].trim(), "body text here")
+    assert_eq(l.width, 100)
+
+@test fn finds_and_steps_through_hits()
+    mut v := sample()
+    v.find("ocr")
+    assert_eq(v.hits.len(), 2)
+    assert_eq(v.message, "match 1 of 2")
+    v.on_key("n", false, false)
+    assert_eq(v.page, 1)
+    v.on_key("n", true, true)
+    assert_eq(v.page, 0)
+    screen := widgets.text_rows(v.render(), 60, 8)
+    assert_eq(screen[0].trim(), "t.pdf  page 1/2")
+    assert_eq(screen[7].trim(), "match 1 of 2")
+
+@test fn types_a_query()
+    mut v := sample()
+    for k in ["/", "e", "a", "s", "y", "enter"]
+        v.on_key(k, false, false)
+    assert_eq(v.query, "easy")
+    assert_eq(v.hits.len(), 1)
+    v.on_key("q", false, false)
+    assert(v.quit)

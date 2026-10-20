@@ -1,0 +1,369 @@
+## The text layer of a page: content streams run through the text state
+## (ISO 32000-2 sections 8.4, 9.3, 9.4) to glyphs with positions, then
+## glyphs grouped into lines. Nothing is drawn and nothing is recognised:
+## each glyph's text comes from its font (fonts.ail), its place from the
+## matrices.
+
+## One shown glyph, in default user space (points, origin bottom left).
+pub struct Glyph
+    pub text str
+    pub x float
+    pub y float
+    pub w float
+    pub size float
+    pub known bool
+
+struct GState
+    ctm List[float]
+    font str
+    size float
+    tc float
+    tw float
+    th float
+    tl float
+    rise float
+
+struct Interp
+    doc Doc
+    gs GState
+    stack List[GState]
+    tm List[float]
+    tlm List[float]
+    fonts Map[str, Font]
+    glyphs List[Glyph]
+    images int
+    depth int
+
+IDENTITY := [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+
+## `a` then `b`: the product a x b of two [a b c d e f] matrices (8.3.4).
+pub fn mul(a List[float], b List[float]) List[float]
+    [
+        a[0] * b[0] + a[1] * b[2],
+        a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2],
+        a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4],
+        a[4] * b[1] + a[5] * b[3] + b[5],
+    ]
+
+fn translate(x float, y float) List[float]
+    [1.0, 0.0, 0.0, 1.0, x, y]
+
+fn floats(ops List[Obj]) List[float]
+    [o.as_num() else 0.0 for o in ops]
+
+## Expands the Latin ligatures U+FB00..FB06 and drops control characters, so
+## extracted text is searchable as typed.
+pub fn plain(t str) str
+    mut out := List[str]()
+    for c in t.chars()
+        n := c.code()
+        piece := match n
+            0xfb00 => "ff"
+            0xfb01 => "fi"
+            0xfb02 => "fl"
+            0xfb03 => "ffi"
+            0xfb04 => "ffl"
+            0xfb05 | 0xfb06 => "st"
+            0xa0 => " "
+            _ => if n < 32 then "" else c.to_str()
+        out.push(piece)
+    out.join("")
+
+## The glyphs of a page, in content order, and how many images it paints.
+pub struct PageText
+    pub glyphs List[Glyph]
+    pub images int
+
+pub fn Doc.page_glyphs(self, page Map[str, Obj]) PageText ! PdfError
+    mut it := Interp(
+        doc: self,
+        gs: GState(ctm: IDENTITY, font: "", size: 0, tc: 0, tw: 0, th: 1, tl: 0, rise: 0),
+        stack: [],
+        tm: IDENTITY,
+        tlm: IDENTITY,
+        fonts: {},
+        glyphs: [],
+        images: 0,
+        depth: 0,
+    )
+    res := key(page, "Resources").as_dict() else {}
+    c := key(page, "Contents")
+    mut data := List[int]()
+    if arr := c.as_arr()
+        for s in arr
+            data.extend(stream_data(resolve(s)) else [])
+            data.push(10)
+    elif c.as_dict() != none
+        data = stream_data(c) else []
+    it.run(data, res, "")?
+    PageText(glyphs: it.glyphs, images: it.images)
+
+fn Interp.font(mut self, res Map[str, Obj], scope str) Font?
+    k := "{scope}/{gs.font}"
+    if f := fonts.get(k)
+        return f
+    fd := doc.key(res, "Font").as_dict() else return none
+    o := fd.get(gs.font) else return none
+    f := doc.font(o, gs.font) else return none
+    fonts[k] = f
+    f
+
+## Runs one content stream; `scope` keys the font cache by the resources
+## a form XObject brings (8.10).
+fn Interp.run(mut self, data List[int], res Map[str, Obj], scope str) ! PdfError
+    mut l := Lexer.new(data, 0)
+    mut ops := List[Obj]()
+    while true
+        l.skip_ws()
+        if l.at_end()
+            break
+        o := l.object(false) else break
+        op := o.as_op() else ""
+        if op == ""
+            ops.push(o)
+            continue
+        if ops.len() > 32
+            ops = []
+        apply(op, ops, res, scope, mut l)?
+        ops = []
+
+fn Interp.apply(
+    mut self,
+    op str,
+    ops List[Obj],
+    res Map[str, Obj],
+    scope str,
+    mut l Lexer,
+) ! PdfError
+    n := floats(ops)
+    match op
+        "q" => stack.push(gs)
+        "Q" =>
+            if s := stack.pop()
+                gs = s
+        "cm" =>
+            if n.len() == 6
+                gs.ctm = mul(n, gs.ctm)
+        "BT" =>
+            tm = IDENTITY
+            tlm = IDENTITY
+        "Tf" =>
+            if ops.len() == 2
+                gs.font = ops[0].as_name() else ""
+                gs.size = n[1]
+        "Tc" => gs.tc = n.first() else 0.0
+        "Tw" => gs.tw = n.first() else 0.0
+        "Tz" => gs.th = (n.first() else 100.0) / 100.0
+        "TL" => gs.tl = n.first() else 0.0
+        "Ts" => gs.rise = n.first() else 0.0
+        "Td" =>
+            if n.len() == 2
+                tlm = mul(translate(n[0], n[1]), tlm)
+                tm = tlm
+        "TD" =>
+            if n.len() == 2
+                gs.tl = -n[1]
+                tlm = mul(translate(n[0], n[1]), tlm)
+                tm = tlm
+        "Tm" =>
+            if n.len() == 6
+                tlm = n
+                tm = n
+        "T*" => next_line()
+        "Tj" => show(ops.last() else Obj.Null, res, scope)
+        "'" =>
+            next_line()
+            show(ops.last() else Obj.Null, res, scope)
+        "\"" =>
+            if ops.len() == 3
+                gs.tw = n[0]
+                gs.tc = n[1]
+            next_line()
+            show(ops.last() else Obj.Null, res, scope)
+        "TJ" =>
+            for item in (ops.last() else Obj.Null).as_arr() else []
+                if adj := item.as_num()
+                    tm = mul(translate(-adj / 1000.0 * gs.size * gs.th, 0.0), tm)
+                else
+                    show(item, res, scope)
+        "Do" => draw_xobject(ops.first() else Obj.Null, res, scope)?
+        "BI" => skip_inline_image(mut l)
+        _ => return
+
+fn Interp.next_line(mut self)
+    tlm = mul(translate(0.0, -gs.tl), tlm)
+    tm = tlm
+
+## Shows a string: one glyph per code, advancing the text matrix (9.4.4).
+fn Interp.show(mut self, s Obj, res Map[str, Obj], scope str)
+    b := s.as_bytes() else return
+    f := font(res, scope) else return
+    # Only the translation of the text matrix changes along a string, so
+    # tm x ctm is computed once and moved by each advance.
+    m := mul(tm, gs.ctm)
+    mut e := m[4]
+    mut fy := m[5]
+    size := gs.size * (m[2] * m[2] + m[3] * m[3]).sqrt()
+    mut total := 0.0
+    for code in f.codes(b)
+        tw := if code.space then gs.tw else 0.0
+        tx := (code.w * gs.size + gs.tc + tw) * gs.th
+        glyphs.push(Glyph(
+            text: code.text,
+            x: e + gs.rise * m[2],
+            y: fy + gs.rise * m[3],
+            w: tx * m[0],
+            size: size,
+            known: code.known,
+        ))
+        e += tx * m[0]
+        fy += tx * m[1]
+        total += tx
+    tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + total * tm[0], tm[5] + total * tm[1]]
+
+## A form XObject runs in place; an image only counts (8.8, 8.10).
+fn Interp.draw_xobject(mut self, name Obj, res Map[str, Obj], scope str) ! PdfError
+    n := name.as_name() else return
+    xd := doc.key(res, "XObject").as_dict() else return
+    x := doc.resolve(xd.get(n) else Obj.Null)
+    d := x.as_dict() else return
+    sub := doc.key(d, "Subtype").as_name() else ""
+    if sub == "Image"
+        images += 1
+        return
+    if sub != "Form" or depth > 12
+        return
+    saved := gs
+    saved_stack := stack.len()
+    m := floats(doc.key(d, "Matrix").as_arr() else [])
+    if m.len() == 6
+        gs.ctm = mul(m, gs.ctm)
+    inner := doc.key(d, "Resources").as_dict() else res
+    data := doc.stream_data(x) else return
+    depth += 1
+    run(data, inner, "{scope}/{n}")?
+    depth -= 1
+    gs = saved
+    while stack.len() > saved_stack
+        stack.pop()
+
+## Skips `ID` data up to `EI` (8.9.7).
+fn Interp.skip_inline_image(mut self, mut l Lexer)
+    images += 1
+    id := find_from(l.buf, ascii("ID"), l.pos) else l.buf.len()
+    mut p := id + 3
+    while p + 2 <= l.buf.len()
+        if l.buf[p] == 69
+            and l.buf[p + 1] == 73
+            and is_white(l.buf[p - 1])
+            and (p + 2 == l.buf.len() or is_white(l.buf[p + 2]))
+            l.pos = p + 2
+            return
+        p += 1
+    l.pos = l.buf.len()
+
+## A line of text: its characters and where each one starts and ends.
+pub struct Line
+    pub text str
+    pub x float
+    pub y float
+    pub size float
+    starts List[float]
+    ends List[float]
+
+pub fn Line.right(self) float
+    ends.last() else x
+
+## The box of characters `a..b` of the line: [x0, y0, x1, y1].
+pub fn Line.box(self, a int, b int) List[float]
+    x0 := if a < starts.len() then starts[a] else x
+    x1 := if b > 0 and b - 1 < ends.len() then ends[b - 1] else x0
+    [x0, y - size * 0.25, x1, y + size * 0.85]
+
+fn glyph(t str, x float, y float) Glyph
+    Glyph(text: t, x: x, y: y, w: 5.0, size: 10.0, known: true)
+
+## Groups glyphs into lines in content order: a new line where the
+## baseline moves by half a glyph or the text jumps back; a space where
+## the gap is wider than 0.15 em and no space was shown.
+pub fn lines_of(glyphs List[Glyph]) List[Line]
+    mut out := List[Line]()
+    mut text := List[str]()
+    mut starts := List[float]()
+    mut ends := List[float]()
+    mut x := 0.0
+    mut y := 0.0
+    mut size := 0.0
+    mut end := 0.0
+    mut last := ""
+    mut last_x := 0.0
+    for g in glyphs
+        if g.text == "" and g.known
+            continue
+        em := g.size.max(size).max(1.0)
+        if text.len() > 0
+            if (g.y - y).abs() > em * 0.5 or g.x < end - em * 1.5
+                out.push(make_line(text, x, y, size, starts, ends))
+                text = []
+                starts = []
+                ends = []
+        if text.len() > 0
+            # A glyph drawn twice in place is fake bold: keep one.
+            if g.text == last and (g.x - last_x).abs() < em * 0.1
+                continue
+            if g.x - end > em * 0.15 and last != " " and g.text != " "
+                text.push(" ")
+                starts.push(end)
+                ends.push(g.x)
+        else
+            x = g.x
+            y = g.y
+            size = g.size
+        t := if g.known then g.text else "\u{fffd}"
+        cs := t.chars()
+        n := cs.len().max(1)
+        for i in 0..cs.len()
+            if cs[i] == ' ' and text.len() > 0 and text[text.len() - 1] == " "
+                continue
+            text.push(cs[i].to_str())
+            starts.push(g.x + g.w * i.to_float() / n.to_float())
+            ends.push(g.x + g.w * (i + 1).to_float() / n.to_float())
+        end = g.x + g.w
+        last = t
+        last_x = g.x
+        size = size.max(g.size)
+    if text.len() > 0
+        out.push(make_line(text, x, y, size, starts, ends))
+    out
+
+fn make_line(
+    text List[str],
+    x float,
+    y float,
+    size float,
+    starts List[float],
+    ends List[float],
+) Line
+    # Trailing spaces carry no text.
+    mut n := text.len()
+    while n > 0 and text[n - 1] == " "
+        n -= 1
+    Line(text: text[..n].join(""), x: x, y: y, size: size, starts: starts[..n], ends: ends[..n])
+
+@test fn multiplies_matrices()
+    assert_eq(
+        mul(translate(10.0, 5.0), [2.0, 0.0, 0.0, 2.0, 1.0, 1.0]),
+        [2.0, 0.0, 0.0, 2.0, 21.0, 11.0],
+    )
+
+@test fn groups_glyphs_into_lines()
+    ls := lines_of([
+        glyph("H", 0.0, 700.0),
+        glyph("i", 5.0, 700.0),
+        glyph("y", 12.0, 700.0),
+        glyph("o", 0.0, 686.0),
+    ])
+    assert_eq([l.text for l in ls], ["Hi y", "o"])
+    assert_eq(ls[0].box(3, 4), [12.0, 697.5, 17.0, 708.5])
