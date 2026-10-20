@@ -29,7 +29,7 @@ pub struct Layout
 
 pub struct Viewer
     pub path str
-    pages List[reader.Page]
+    pages reader.Pages
     pub page int
     pub top int
     pub cols int
@@ -42,7 +42,7 @@ pub struct Viewer
     pub quit bool
     layouts Map[int, Layout]
 
-pub fn Viewer.new(path str, pages List[reader.Page], cols int, rows int) Viewer
+pub fn Viewer.new(path str, pages reader.Pages, cols int, rows int) Viewer
     Viewer(
         path: path,
         pages: pages,
@@ -141,7 +141,7 @@ fn overlaps(spans List[List[int]], a int, b int) bool
 fn Viewer.layout_of(mut self, i int) Layout
     if l := layouts.get(i)
         return l
-    l := layout(pages[i], cols - 2)
+    l := layout(pages.get(i), cols - 2)
     layouts[i] = l
     l
 
@@ -149,34 +149,52 @@ fn Viewer.layout_of(mut self, i int) Layout
 fn Viewer.body_rows(self) int
     (rows - 2).max(1)
 
-## Runs a search over every page; the first hit at or after the current
-## page becomes current.
+## Searches for `q` from the current page on, reading pages only until
+## one has a match (ADR 0511).
 pub fn Viewer.find(mut self, q str)
     query = q
     hits = []
-    for p in pages
-        hits.extend(reader.search_page(p, q, false))
     hit = -1
-    if hits.len() == 0
+    if not seek(page, 1, false)
         message = "no match for \"{q}\""
+
+## The first page with a match from page `from`, stepping `dir` and
+## wrapping; its matches become `hits`, and the first (or with `last`, the
+## last) is current.
+fn Viewer.seek(mut self, from int, dir int, last bool) bool
+    n := pages.count()
+    for k in 0..n
+        i := ((from + dir * k) % n + n) % n
+        hs := reader.search_page(pages.get(i), query, false)
+        if hs.len() > 0
+            hits = hs
+            go_hit(if last then hs.len() - 1 else 0)
+            return true
+    false
+
+## The next (`dir` 1) or previous (-1) match, moving to the next page with
+## one when this page's run out.
+fn Viewer.step_hit(mut self, dir int)
+    if query == ""
         return
-    for i in 0..hits.len()
-        if hits[i].page - 1 >= page
-            go_hit(i)
-            return
-    go_hit(0)
+    if hits.len() == 0
+        find(query)
+        return
+    j := hit + dir
+    if j >= 0 and j < hits.len()
+        go_hit(j)
+        return
+    seek(hits[0].page - 1 + dir, dir, dir < 0)
 
 fn Viewer.go_hit(mut self, i int)
-    if hits.len() == 0
-        return
-    hit = (i % hits.len() + hits.len()) % hits.len()
+    hit = i
     h := hits[hit]
     page = h.page - 1
     l := layout_of(page)
     r := row_of(l, h.line)
     if r < top or r >= top + body_rows()
         top = (r - body_rows() / 3).max(0)
-    message = "match {hit + 1} of {hits.len()}"
+    message = "match {hit + 1} of {hits.len()} on page {page + 1}"
 
 fn row_of(l Layout, line int) int
     for r in 0..l.cells.len()
@@ -186,7 +204,7 @@ fn row_of(l Layout, line int) int
     0
 
 fn Viewer.go_page(mut self, n int)
-    page = n.max(0).min(pages.len() - 1)
+    page = n.max(0).min(pages.count() - 1)
     top = 0
 
 ## One key, as the window sends it (std.ui.4): `key` is a name such as
@@ -214,9 +232,9 @@ pub fn Viewer.on_key(mut self, key str, ctrl bool, shift bool)
         typing = true
         query = ""
     elif key == "n" and not shift
-        go_hit(hit + 1)
+        step_hit(1)
     elif key == "n" and shift
-        go_hit(hit - 1)
+        step_hit(-1)
     elif key == "pagedown" or key == "space"
         go_page(page + 1)
     elif key == "pageup" or key == "backspace"
@@ -228,7 +246,7 @@ pub fn Viewer.on_key(mut self, key str, ctrl bool, shift bool)
     elif key == "home"
         go_page(0)
     elif key == "end"
-        go_page(pages.len() - 1)
+        go_page(pages.count() - 1)
 
 ## Scroll by `n` rows, from the mouse wheel.
 pub fn Viewer.scroll(mut self, n int)
@@ -251,8 +269,8 @@ fn Viewer.hit_at(self, pi int, li int, ci int) int
 pub fn Viewer.render(mut self) List[widgets.Run]
     mut runs := List[widgets.Run]()
     l := layout_of(page)
-    pm := pages[page].model
-    title := " {base(path)}  page {page + 1}/{pages.len()}"
+    pm := pages.get(page).model
+    title := " {base(path)}  page {page + 1}/{pages.count()}"
     note := if pm.image_only then "  image-only page: a scan, no text without OCR" else ""
     runs.push(bar(0, "{title}{note}", cols))
     body := body_rows()
@@ -324,17 +342,33 @@ fn base(path str) str
 ## its hits, and the visible text rows.
 pub fn Viewer.state_json(mut self) Json
     l := layout_of(page)
+    pm := pages.get(page).model
     shown := [l.rows[i] for i in top..(top + body_rows()).min(l.rows.len())]
     mut m := List[JsonMember]()
     m.push(JsonMember(key: "file", value: Json.Str(path)))
     m.push(JsonMember(key: "page", value: Json.Num((page + 1).to_float())))
-    m.push(JsonMember(key: "pages", value: Json.Num(pages.len().to_float())))
+    m.push(JsonMember(key: "pages", value: Json.Num(pages.count().to_float())))
     m.push(JsonMember(key: "top_row", value: Json.Num(top.to_float())))
     m.push(JsonMember(key: "query", value: Json.Str(query)))
     m.push(JsonMember(key: "hit", value: Json.Num((hit + 1).to_float())))
     m.push(JsonMember(key: "hits", value: Json.Arr([h.to_json() for h in hits])))
     m.push(JsonMember(key: "screen", value: Json.Arr([Json.Str(s) for s in shown])))
+    m.push(JsonMember(key: "visible", value: Json.Arr([
+        pm.lines[i].to_json()
+        for i in visible_lines(l)
+    ])))
+    m.push(JsonMember(key: "pages_read", value: Json.Num(pages.read_count().to_float())))
     Json.Obj(m)
+
+## The page's lines with a character on screen, in page order: the words a
+## person sees right now, with their positions on the page.
+fn Viewer.visible_lines(self, l Layout) List[int]
+    mut seen := Set[int]()
+    for r in top..(top + body_rows()).min(l.cells.len())
+        for c in l.cells[r]
+            if c[0] >= 0
+                seen.add(c[0])
+    seen.sorted()
 
 fn press(spec str) List[str]
     mut key := spec
@@ -351,18 +385,16 @@ fn press(spec str) List[str]
 ## The viewer from the command line: `--page N`, `--find TEXT`, then
 ## `--keys "n n pagedown"`; `--print` prints the screen and `--json` its
 ## state instead of opening a window.
-pub fn start(path str, pages List[reader.Page], flags Map[str, str])
-    if pages.len() == 0
+pub fn start(path str, pages reader.Pages, flags Map[str, str])
+    if pages.count() == 0
         io.eprint("pdf: {path} has no pages")
         return
-    mut need := 20
-    for p in pages
-        need = need.max(natural_width(p) + 2)
+    start_page := ((flags.get("--page") else "1").to_int() else 1).max(1).min(pages.count()) - 1
+    need := (natural_width(pages.get(start_page)) + 2).max(20)
     cols := (flags.get("--cols") else "").to_int() else need.min(180)
     rows := (flags.get("--rows") else "40").to_int() else 40
     mut v := Viewer.new(path, pages, cols, rows)
-    if p := flags.get("--page")
-        v.go_page((p.to_int() else 1) - 1)
+    v.go_page(start_page)
     if q := flags.get("--find")
         v.find(q)
     for k in (flags.get("--keys") else "").split(" ")
@@ -400,7 +432,7 @@ fn window(mut v Viewer)
 fn sample() Viewer
     p1 := reader.text_page(1, ["Searching a PDF without", "OCR is easy."])
     p2 := reader.text_page(2, ["Second page about OCR."])
-    Viewer.new("dir/t.pdf", [p1, p2], 60, 8)
+    Viewer.new("dir/t.pdf", reader.pages_of([p1, p2]), 60, 8)
 
 @test fn lays_text_out_at_its_positions()
     l := layout(reader.text_page(1, ["Title", "body text here"]), 100)
@@ -411,15 +443,18 @@ fn sample() Viewer
 @test fn finds_and_steps_through_hits()
     mut v := sample()
     v.find("ocr")
-    assert_eq(v.hits.len(), 2)
-    assert_eq(v.message, "match 1 of 2")
+    assert_eq(v.hits.len(), 1)
+    assert_eq(v.message, "match 1 of 1 on page 1")
     v.on_key("n", false, false)
     assert_eq(v.page, 1)
-    v.on_key("n", true, true)
+    v.on_key("n", false, false)
     assert_eq(v.page, 0)
+    v.on_key("n", true, true)
+    assert_eq(v.page, 1)
+    v.on_key("n", true, true)
     screen := widgets.text_rows(v.render(), 60, 8)
     assert_eq(screen[0].trim(), "t.pdf  page 1/2")
-    assert_eq(screen[7].trim(), "match 1 of 2")
+    assert_eq(screen[7].trim(), "match 1 of 1 on page 1")
 
 @test fn types_a_query()
     mut v := sample()

@@ -20,6 +20,13 @@ OCR instead ([ADR 0520](../../docs/decisions/0520-pdf-reader-on-the-text-layer.m
 ./ail test tools/pdf/pdf.ail                              # the headless tests
 ```
 
+Only the pages a command needs are read
+([ADR 0511](../../docs/decisions/0511-pdf-pages-read-on-demand.md)): `--page
+N` reads one, the viewer reads what it shows and searches forward page by
+page, and `grep` prints each page's hits as it goes (`--first` stops at the
+first page with a match). The viewer's `--json` lists the lines visible on
+screen with their positions.
+
 Search ignores case (`--case` keeps it) and whitespace runs, crosses line
 breaks, and joins a word hyphenated at a line end. `grep` exits 1 when
 nothing matches.

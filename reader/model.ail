@@ -259,12 +259,56 @@ fn Doc.outline_items(
 
 ## Every page, read (1-based numbers). A page that fails to read is empty.
 pub fn Doc.read_pages(self) List[Page] ! PdfError
-    pages := pages()?
-    nums := page_numbers(pages)
-    mut out := List[Page]()
-    for i in 0..pages.len()
-        out.push(read_page(pages[i], i + 1, nums))
-    out
+    ps := lazy_pages()?
+    [ps.get(i) for i in 0..ps.count()]
+
+struct PageCache
+    pages Map[int, Page]
+
+## The pages of a document, each read the first time it is asked for
+## (ADR 0511): opening costs the page tree only, and a viewer or a search
+## that stops early never reads the rest.
+pub struct Pages
+    doc Doc
+    dicts List[Map[str, Obj]]
+    nums Map[int, int]
+    cache ref PageCache
+
+pub fn Doc.lazy_pages(self) Pages ! PdfError
+    dicts := pages()?
+    Pages(doc: self, dicts: dicts, nums: page_numbers(dicts), cache: ref PageCache(pages: {}))
+
+pub fn Pages.count(self) int
+    dicts.len()
+
+## Page `i` (0-based), read once.
+pub fn Pages.get(self, i int) Page
+    if p := cache.pages.get(i)
+        return p
+    p := doc.read_page(dicts[i], i + 1, nums)
+    cache.pages[i] = p
+    p
+
+## Pages already read, for tests and tools that build pages themselves.
+pub fn pages_of(list List[Page]) Pages
+    doc := Doc(buf: [], xref: {}, trailer: {}, cache: ref Cache(objs: {}), repaired: false)
+    mut m := Map[int, Page]()
+    for i in 0..list.len()
+        m[i] = list[i]
+    Pages(
+        doc: doc,
+        dicts: [Map[str, Obj]() for _ in list],
+        nums: {},
+        cache: ref PageCache(pages: m),
+    )
+
+## How many pages have been read so far.
+pub fn Pages.read_count(self) int
+    cache.pages.len()
+
+## Whether page `i` has been read.
+pub fn Pages.is_read(self, i int) bool
+    cache.pages.contains(i)
 
 ## A line in page coordinates: from the crop box's lower left corner.
 fn shift(l Line, dx float, dy float) Line

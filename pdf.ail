@@ -18,7 +18,7 @@ use view
 USAGE := """
     usage: pdf COMMAND ...
       text FILE [--page N]                  the text, pages split by form feeds
-      grep [--case] [--json] PATTERN FILE...  FILE:PAGE: line, for each line with a hit
+      grep [--case] [--json] [--first] PATTERN FILE...  FILE:PAGE: line, for each line with a hit
       json FILE [--page N]                  the page model: lines, boxes, links, outline
       info FILE                             pages, metadata, and what could not be read
       outline FILE                          the bookmarks, with their pages
@@ -34,7 +34,7 @@ struct Args
 ## Words and `--flag [value]` options; `--case`, `--json` and `--print`
 ## take no value.
 fn parse_args(raw List[str]) Args
-    bare := {"--case", "--json", "--print"}
+    bare := {"--case", "--json", "--print", "--first"}
     mut a := Args(words: [], flags: {})
     mut i := 0
     while i < raw.len()
@@ -57,13 +57,14 @@ fn open_doc(path str) reader.Doc ! reader.PdfError
     reader.Doc.open(reader.read_file(path)?)
 
 ## The pages `--page` picks: all of them, or one.
+## Only the chosen page is read (ADR 0511).
 fn chosen(doc reader.Doc, a Args) List[reader.Page] ! reader.PdfError
-    all := doc.read_pages()?
-    p := a.flags.get("--page") else return all
+    ps := doc.lazy_pages()?
+    p := a.flags.get("--page") else return [ps.get(i) for i in 0..ps.count()]
     n := p.to_int() else return reader.PdfError.Io(why: "--page needs a number, got {p}")
-    if n < 1 or n > all.len()
-        return reader.PdfError.Io(why: "no page {n}; the document has {all.len()}")
-    [all[n - 1]]
+    if n < 1 or n > ps.count()
+        return reader.PdfError.Io(why: "no page {n}; the document has {ps.count()}")
+    [ps.get(n - 1)]
 
 fn text_cmd(a Args) ! reader.PdfError
     path := a.word(1) else return reader.PdfError.Io(why: "text needs a FILE")
@@ -85,8 +86,13 @@ fn grep_cmd(a Args) bool ! reader.PdfError
         doc := open_doc(path) else err
             io.eprint("pdf: {path}: {err}")
             continue
-        for p in doc.read_pages()?
-            hits := reader.search_page(p, pattern, case)
+        # Page by page: each hit prints as soon as its page is read, and
+        # `--first` stops at the first page with one (ADR 0511).
+        ps := doc.lazy_pages()?
+        for i in 0..ps.count()
+            if found and a.flags.contains("--first")
+                break
+            hits := reader.search_page(ps.get(i), pattern, case)
             mut last := -1
             for h in hits
                 found = true
@@ -208,7 +214,7 @@ fn main()
             io.eprint("pdf: {err}")
             io.exit(2)
             return
-        pages := doc.read_pages() else err
+        pages := doc.lazy_pages() else err
             io.eprint("pdf: {err}")
             io.exit(2)
             return
