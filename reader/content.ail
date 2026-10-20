@@ -32,6 +32,7 @@ struct Interp
     fonts Map[str, Font]
     glyphs List[Glyph]
     images int
+    placed List[Placed]
     depth int
 
 IDENTITY := [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
@@ -71,10 +72,17 @@ pub fn plain(t str) str
         out.push(piece)
     out.join("")
 
+## An image painted on a page: its stream and the matrix that maps its
+## unit square onto the page (8.9.4), for OCR to read later.
+pub struct Placed
+    pub obj Obj
+    pub ctm List[float]
+
 ## The glyphs of a page, in content order, and how many images it paints.
 pub struct PageText
     pub glyphs List[Glyph]
     pub images int
+    pub placed List[Placed]
 
 pub fn Doc.page_glyphs(self, page Map[str, Obj]) PageText ! PdfError
     mut it := Interp(
@@ -86,6 +94,7 @@ pub fn Doc.page_glyphs(self, page Map[str, Obj]) PageText ! PdfError
         fonts: {},
         glyphs: [],
         images: 0,
+        placed: [],
         depth: 0,
     )
     res := key(page, "Resources").as_dict() else {}
@@ -98,7 +107,7 @@ pub fn Doc.page_glyphs(self, page Map[str, Obj]) PageText ! PdfError
     elif c.as_dict() != none
         data = stream_data(c) else []
     it.run(data, res, "")?
-    PageText(glyphs: it.glyphs, images: it.images)
+    PageText(glyphs: it.glyphs, images: it.images, placed: it.placed)
 
 fn Interp.font(mut self, res Map[str, Obj], scope str) Font?
     k := "{scope}/{gs.font}"
@@ -232,6 +241,7 @@ fn Interp.draw_xobject(mut self, name Obj, res Map[str, Obj], scope str) ! PdfEr
     sub := doc.key(d, "Subtype").as_name() else ""
     if sub == "Image"
         images += 1
+        placed.push(Placed(obj: x, ctm: gs.ctm))
         return
     if sub != "Form" or depth > 12
         return

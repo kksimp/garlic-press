@@ -133,7 +133,7 @@ fn test_page(lines List[Line]) Page
         unreadable: 0,
         image_only: false,
     )
-    Page(model: m, lines: lines)
+    Page(model: m, lines: lines, placed: [])
 
 @test fn finds_text_across_lines()
     p := test_page([

@@ -257,25 +257,10 @@ pub fn Doc.key(self, d Map[str, Obj], k str) Obj
 
 ## The decoded data of a stream (7.4).
 pub fn Doc.stream_data(self, o Obj) List[int] ! PdfError
-    match o
-        Stream(d, start, n) =>
-            mut data := buf[start..(start + n).min(buf.len())]
-            filters := key(d, "Filter")
-            parms := key(d, "DecodeParms")
-            mut names := List[str]()
-            mut ps := List[Obj]()
-            if f := filters.as_name()
-                names.push(f)
-                ps.push(parms)
-            elif fs := filters.as_arr()
-                for i in 0..fs.len()
-                    names.push(resolve(fs[i]).as_name() else "")
-                    pa := parms.as_arr() else []
-                    ps.push(if i < pa.len() then resolve(pa[i]) else Obj.Null)
-            for i in 0..names.len()
-                data = decode_filter(names[i], data, (resolve(ps[i]).as_dict() else {}))?
-            data
-        Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Op => Bad(why: "not a stream")
+    e := image_stream(o)?
+    if e.codec != ""
+        return Unsupported(what: "the {e.codec} filter")
+    e.data
 
 ## The catalog's page objects in order, with inherited attributes
 ## (7.7.3.3, 7.7.3.4).
@@ -316,3 +301,37 @@ fn Doc.walk_pages(
         return
     for kid in kids else []
         walk_pages(kid, inh, mut out, mut seen, depth + 1)?
+
+## An image stream with every filter applied but a last image codec
+## (CCITTFaxDecode, DCTDecode, JBIG2Decode, JPXDecode): its bytes, the
+## codec's name ("" for raw samples) and the codec's parameters.
+pub struct Encoded
+    pub data List[int]
+    pub codec str
+    pub parms Map[str, Obj]
+
+CODECS := {"CCITTFaxDecode", "CCF", "DCTDecode", "DCT", "JBIG2Decode", "JPXDecode"}
+
+pub fn Doc.image_stream(self, o Obj) Encoded ! PdfError
+    match o
+        Stream(d, start, n) =>
+            mut data := buf[start..(start + n).min(buf.len())]
+            filters := key(d, "Filter")
+            parms := key(d, "DecodeParms")
+            mut names := List[str]()
+            mut ps := List[Obj]()
+            if f := filters.as_name()
+                names.push(f)
+                ps.push(parms)
+            elif fs := filters.as_arr()
+                for i in 0..fs.len()
+                    names.push(resolve(fs[i]).as_name() else "")
+                    pa := parms.as_arr() else []
+                    ps.push(if i < pa.len() then resolve(pa[i]) else Obj.Null)
+            for i in 0..names.len()
+                p := resolve(ps[i]).as_dict() else {}
+                if CODECS.contains(names[i])
+                    return Encoded(data: data, codec: names[i], parms: p)
+                data = decode_filter(names[i], data, p)?
+            Encoded(data: data, codec: "", parms: {})
+        Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Op => Bad(why: "not a stream")

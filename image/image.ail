@@ -1,0 +1,750 @@
+## Grey bitmaps and the image decoders a scanned page needs: raw samples,
+## CCITT Group 3 and 4 fax (ITU-T T.4, T.6) and baseline JPEG (ITU-T T.81),
+## written from the standards (ADR 0512). Shared by the PDF reader's OCR,
+## the browser and the editor; it moves beside `std.ui` as `std.ui.image`.
+##
+## Pixels are `int`s 0 (black) to 255 (white), row by row.
+
+use std.tensor
+
+pub struct Gray
+    pub width int
+    pub height int
+    pub px List[int]
+
+pub error enum ImageError
+    Bad(why str) "bad image data: {why}"
+    Unsupported(what str) "image format not supported yet: {what}"
+
+pub fn Gray.new(width int, height int, value int) Gray
+    Gray(width: width, height: height, px: [value for _ in 0..width * height])
+
+pub fn Gray.at(self, x int, y int) int
+    px[y * width + x]
+
+## Inverts every pixel, for a `/Decode [1 0]` image.
+pub fn Gray.inverted(self) Gray
+    Gray(width: width, height: height, px: [255 - p for p in px])
+
+## The grey value of samples: `comps` 1 (grey), 3 (RGB) or 4 (CMYK), each
+## `bpc` bits, rows padded to a byte.
+pub fn from_samples(data List[int], w int, h int, bpc int, comps int) Gray ! ImageError
+    if bpc != 1 and bpc != 2 and bpc != 4 and bpc != 8 and bpc != 16
+        return Unsupported(what: "{bpc} bits per component")
+    row := (w * comps * bpc + 7) / 8
+    if data.len() < row * h
+        return Bad(why: "{data.len()} bytes for a {w}x{h} image needing {row * h}")
+    if bpc == 8 and comps == 1
+        return Gray(width: w, height: h, px: data[..w * h])
+    maxv := 1.shl(bpc) - 1
+    mut px := List[int]()
+    for y in 0..h
+        base := y * row
+        for x in 0..w
+            mut v := List[int]()
+            for c in 0..comps
+                v.push(sample(data, base, (x * comps + c) * bpc, bpc) * 255 / maxv)
+            px.push(grey_of(v))
+    Gray(width: w, height: h, px: px)
+
+fn grey_of(v List[int]) int
+    if v.len() == 3
+        return (v[0] * 299 + v[1] * 587 + v[2] * 114) / 1000
+    if v.len() == 4
+        return (255 - (v[0] * 299 + v[1] * 587 + v[2] * 114) / 1000 - v[3]).max(0)
+    v[0]
+
+## Samples through a palette of `base` components each (8.6.6.3).
+pub fn from_indexed(
+    data List[int],
+    w int,
+    h int,
+    bpc int,
+    palette List[int],
+    base int,
+) Gray ! ImageError
+    idx := from_samples(data, w, h, bpc, 1)?
+    maxv := 1.shl(bpc) - 1
+    mut px := List[int]()
+    for p in idx.px
+        i := (p * maxv + 127) / 255 * base
+        if i + base > palette.len()
+            px.push(0)
+        elif base == 3
+            px.push((palette[i] * 299 + palette[i + 1] * 587 + palette[i + 2] * 114) / 1000)
+        else
+            px.push(palette[i])
+    Gray(width: w, height: h, px: px)
+
+fn sample(data List[int], base int, bit int, bpc int) int
+    if bpc == 8
+        return data[base + bit / 8]
+    if bpc == 16
+        return data[base + bit / 8]
+    b := data[base + bit / 8]
+    b.shr(8 - bpc - bit % 8).bit_and(1.shl(bpc) - 1)
+
+# ---- CCITT fax (T.4, T.6) ----
+
+## White run codes as `bits=run`, terminating then make-up (T.4 tables 2, 3).
+WHITE_CODES := """
+    00110101=0 000111=1 0111=2 1000=3 1011=4 1100=5 1110=6 1111=7 10011=8 10100=9 00111=10 01000=11
+    001000=12 000011=13 110100=14 110101=15 101010=16 101011=17 0100111=18 0001100=19 0001000=20
+    0010111=21 0000011=22 0000100=23 0101000=24 0101011=25 0010011=26 0100100=27 0011000=28
+    00000010=29 00000011=30 00011010=31 00011011=32 00010010=33 00010011=34 00010100=35 00010101=36
+    00010110=37 00010111=38 00101000=39 00101001=40 00101010=41 00101011=42 00101100=43 00101101=44
+    00000100=45 00000101=46 00001010=47 00001011=48 01010010=49 01010011=50 01010100=51 01010101=52
+    00100100=53 00100101=54 01011000=55 01011001=56 01011010=57 01011011=58 01001010=59 01001011=60
+    00110010=61 00110011=62 00110100=63 11011=64 10010=128 010111=192 0110111=256 00110110=320
+    00110111=384 01100100=448 01100101=512 01101000=576 01100111=640 011001100=704 011001101=768
+    011010010=832 011010011=896 011010100=960 011010101=1024 011010110=1088 011010111=1152
+    011011000=1216 011011001=1280 011011010=1344 011011011=1408 010011000=1472 010011001=1536
+    010011010=1600 011000=1664 010011011=1728
+    """
+
+## Black run codes (T.4 tables 2, 3).
+BLACK_CODES := """
+    0000110111=0 010=1 11=2 10=3 011=4 0011=5 0010=6 00011=7 000101=8 000100=9 0000100=10
+    0000101=11 0000111=12 00000100=13 00000111=14 000011000=15 0000010111=16 0000011000=17
+    0000001000=18 00001100111=19 00001101000=20 00001101100=21 00000110111=22 00000101000=23
+    00000010111=24 00000011000=25 000011001010=26 000011001011=27 000011001100=28 000011001101=29
+    000001101000=30 000001101001=31 000001101010=32 000001101011=33 000011010010=34 000011010011=35
+    000011010100=36 000011010101=37 000011010110=38 000011010111=39 000001101100=40 000001101101=41
+    000011011010=42 000011011011=43 000001010100=44 000001010101=45 000001010110=46 000001010111=47
+    000001100100=48 000001100101=49 000001010010=50 000001010011=51 000000100100=52 000000110111=53
+    000000111000=54 000000100111=55 000000101000=56 000001011000=57 000001011001=58 000000101011=59
+    000000101100=60 000001011010=61 000001100110=62 000001100111=63 0000001111=64 000011001000=128
+    000011001001=192 000001011011=256 000000110011=320 000000110100=384 000000110101=448
+    0000001101100=512 0000001101101=576 0000001001010=640 0000001001011=704 0000001001100=768
+    0000001001101=832 0000001110010=896 0000001110011=960 0000001110100=1024 0000001110101=1088
+    0000001110110=1152 0000001110111=1216 0000001010010=1280 0000001010011=1344 0000001010100=1408
+    0000001010101=1472 0000001011010=1536 0000001011011=1600 0000001100100=1664 0000001100101=1728
+    """
+
+## Make-up codes both colours share (T.4 table 3, extended).
+EXT_CODES := """
+    00000001000=1792 00000001100=1856 00000001101=1920 000000010010=1984 000000010011=2048
+    000000010100=2112 000000010101=2176 000000010110=2240 000000010111=2304 000000011100=2368
+    000000011101=2432 000000011110=2496 000000011111=2560
+    """
+
+## Mode codes (T.4 table 4): pass, horizontal, and vertical -3..3.
+MODE_CODES := "0001=0 001=1 1=5 011=6 000011=7 0000011=8 010=4 000010=3 0000010=2"
+
+## 13-bit lookahead tables: entry `run * 32 + length`, 0 for no code.
+WHITE_LUT := code_table("{WHITE_CODES} {EXT_CODES} 000000000001=4095", 13)
+BLACK_LUT := code_table("{BLACK_CODES} {EXT_CODES} 000000000001=4095", 13)
+MODE_LUT := code_table(MODE_CODES, 7)
+
+fn code_table(codes str, bits int) List[int]
+    mut t := [0 for _ in 0..1.shl(bits)]
+    for w in codes.replace("\n", " ").split(" ")
+        if w == ""
+            continue
+        parts := w.split("=")
+        code := parts[0]
+        run := parts[1].to_int() else 0
+        n := code.chars().len()
+        mut v := 0
+        for c in code.chars()
+            v = v * 2 + (if c == '1' then 1 else 0)
+        first := v.shl(bits - n)
+        for k in 0..1.shl(bits - n)
+            t[first + k] = run * 32 + n
+    t
+
+struct FaxBits
+    data List[int]
+    pos int
+
+fn FaxBits.peek(self, n int) int
+    mut v := 0
+    for i in 0..n
+        p := pos + i
+        byte := p / 8
+        bit := if byte < data.len() then data[byte].shr(7 - p % 8).bit_and(1) else 0
+        v = v * 2 + bit
+    v
+
+fn FaxBits.done(self) bool
+    pos >= data.len() * 8
+
+fn FaxBits.code(mut self, table List[int], bits int) int ! ImageError
+    e := table[peek(bits)]
+    if e == 0
+        return Bad(why: "no fax code at bit {pos}")
+    pos += e % 32
+    e / 32
+
+## A run of one colour: make-up codes, then a terminating code.
+fn FaxBits.run(mut self, black bool) int ! ImageError
+    mut total := 0
+    while true
+        v := code(if black then BLACK_LUT else WHITE_LUT, 13)?
+        if v == 4095
+            return Bad(why: "end of line inside a run")
+        total += v
+        if v < 64
+            return total
+
+## Skips an end-of-line code (eleven 0s and a 1) if one is next.
+fn FaxBits.eol(mut self) bool
+    if peek(12) == 1
+        pos += 12
+        return true
+    false
+
+## Decodes CCITT fax data (8.4 CCITTFaxDecode): `k` < 0 is Group 4, 0 is
+## one-dimensional Group 3, > 0 mixed. Changing elements are kept per row,
+## so the work is per colour change, not per pixel.
+pub fn ccitt(data List[int], cols int, rows int, k int, align bool, black1 bool) Gray ! ImageError
+    mut b := FaxBits(data: data, pos: 0)
+    mut refl := [cols, cols]
+    mut px := List[int]()
+    black := if black1 then 255 else 0
+    white := 255 - black
+    mut y := 0
+    while rows <= 0 or y < rows
+        if b.done()
+            break
+        if align and k >= 0
+            b.pos = (b.pos + 7) / 8 * 8
+        mut two_d := k < 0
+        if k >= 0
+            mut eols := 0
+            while b.eol()
+                eols += 1
+            if eols >= 2 and y > 0
+                break
+            if k > 0
+                two_d = b.peek(1) == 0
+                b.pos += 1
+        if b.done()
+            break
+        cur := if two_d then row_2d(mut b, refl, cols)? else row_1d(mut b, cols)?
+        if cur.len() == 1 and cur[0] < 0
+            break
+        mut color := white
+        mut x := 0
+        for c in cur
+            e := c.min(cols)
+            while x < e
+                px.push(color)
+                x += 1
+            color = if color == white then black else white
+        while x < cols
+            px.push(color)
+            x += 1
+        refl = cur
+        refl.push(cols)
+        refl.push(cols)
+        y += 1
+        if align and k < 0
+            b.pos = (b.pos + 7) / 8 * 8
+    Gray(width: cols, height: y, px: px)
+
+fn row_1d(mut b FaxBits, cols int) List[int] ! ImageError
+    mut cur := List[int]()
+    mut a := 0
+    mut black := false
+    while a < cols
+        a = (a + b.run(black)?).min(cols)
+        cur.push(a)
+        black = not black
+    cur
+
+## One two-dimensional row against the reference row's changing elements
+## (T.4 4.2.1.3). `[-1]` means the end-of-block code came instead.
+fn row_2d(mut b FaxBits, refl List[int], cols int) List[int] ! ImageError
+    mut cur := List[int]()
+    mut a0 := -1
+    mut color := 0
+    mut j := 0
+    while a0 < cols
+        if b.peek(12) == 1
+            return [-1]
+        mode := b.code(MODE_LUT, 7)?
+        j = (j - 2).max(0)
+        while j < refl.len() - 2 and (refl[j] <= a0 or j % 2 != color)
+            j += 1
+        b1 := refl[j]
+        b2 := refl[(j + 1).min(refl.len() - 1)]
+        if mode == 0
+            a0 = b2
+        elif mode == 1
+            start := a0.max(0)
+            r1 := b.run(color == 1)?
+            r2 := b.run(color == 0)?
+            a1 := (start + r1).min(cols)
+            a2 := (a1 + r2).min(cols)
+            cur.push(a1)
+            cur.push(a2)
+            a0 = a2
+        else
+            a1 := b1 + mode - 5
+            if a1 < 0 or a1 > cols
+                return Bad(why: "vertical code off the row")
+            cur.push(a1)
+            a0 = a1
+            color = 1 - color
+    cur
+
+# ---- Baseline JPEG (T.81) ----
+
+## Natural index of each zig-zag position (T.81 figure A.6).
+ZIGZAG := [
+    0,
+    1,
+    8,
+    16,
+    9,
+    2,
+    3,
+    10,
+    17,
+    24,
+    32,
+    25,
+    18,
+    11,
+    4,
+    5,
+    12,
+    19,
+    26,
+    33,
+    40,
+    48,
+    41,
+    34,
+    27,
+    20,
+    13,
+    6,
+    7,
+    14,
+    21,
+    28,
+    35,
+    42,
+    49,
+    56,
+    57,
+    50,
+    43,
+    36,
+    29,
+    22,
+    15,
+    23,
+    30,
+    37,
+    44,
+    51,
+    58,
+    59,
+    52,
+    45,
+    38,
+    31,
+    39,
+    46,
+    53,
+    60,
+    61,
+    54,
+    47,
+    55,
+    62,
+    63,
+]
+
+struct Comp
+    id int
+    h int
+    v int
+    tq int
+    td int
+    ta int
+
+## A Huffman table as a 16-bit lookahead: entry `length * 256 + value`.
+struct Huff
+    lut List[int]
+
+struct JBits
+    data List[int]
+    pos int
+    buf int
+    cnt int
+    marker bool
+
+fn huff_table(counts List[int], values List[int]) Huff
+    mut lut := [0 for _ in 0..65536]
+    mut code := 0
+    mut k := 0
+    for len in 1..17
+        for _ in 0..counts[len - 1]
+            if k < values.len()
+                first := code.shl(16 - len)
+                for i in 0..1.shl(16 - len)
+                    lut[first + i] = len * 256 + values[k]
+            k += 1
+            code += 1
+        code *= 2
+    Huff(lut: lut)
+
+fn JBits.fill(mut self)
+    while cnt <= 24
+        if marker or pos >= data.len()
+            buf = buf.shl(8).bit_and(0xffffffff)
+            cnt += 8
+            continue
+        c := data[pos]
+        if c == 0xff
+            n := if pos + 1 < data.len() then data[pos + 1] else 0
+            if n == 0
+                pos += 2
+            else
+                marker = true
+                continue
+        else
+            pos += 1
+        buf = buf.shl(8).bit_or(c).bit_and(0xffffffff)
+        cnt += 8
+
+fn JBits.bits(mut self, n int) int
+    if n == 0
+        return 0
+    if cnt < n
+        fill()
+    v := buf.shr(cnt - n).bit_and(1.shl(n) - 1)
+    cnt -= n
+    v
+
+fn JBits.decode(mut self, h Huff) int ! ImageError
+    if cnt < 16
+        fill()
+    e := h.lut[buf.shr(cnt - 16).bit_and(0xffff)]
+    if e == 0
+        return Bad(why: "bad Huffman code in JPEG data")
+    cnt -= e / 256
+    e % 256
+
+## Restarts after an RSTn marker: drop the bits left, step over the marker.
+fn JBits.restart(mut self)
+    buf = 0
+    cnt = 0
+    marker = false
+    while pos + 1 < data.len()
+        and not (data[pos] == 0xff and data[pos + 1] >= 0xd0 and data[pos + 1] <= 0xd7)
+        pos += 1
+    pos += 2
+
+fn extend(v int, s int) int
+    if s == 0
+        return 0
+    if v < 1.shl(s - 1) then v - 1.shl(s) + 1 else v
+
+## The 64x64 matrix that turns a block's coefficients into its pixels
+## (T.81 A.3.3), so a whole plane's inverse DCT is one matrix product.
+IDCT := idct_matrix()
+
+fn idct_matrix() List[float]
+    # cos(k pi / 16) for k in 0..32, by its Taylor series (std has no cos).
+    mut c := List[float]()
+    for k in 0..32
+        t := k.to_float() * 3.141592653589793 / 16.0
+        r := if t > 3.141592653589793 then t - 6.283185307179586 else t
+        mut term := 1.0
+        mut sum := 1.0
+        for i in 1..20
+            term = -term * r * r / ((2 * i - 1) * (2 * i)).to_float()
+            sum += term
+        c.push(sum)
+    mut m := List[float]()
+    for u in 0..8
+        for v in 0..8
+            cu := if u == 0 then 0.7071067811865476 else 1.0
+            cv := if v == 0 then 0.7071067811865476 else 1.0
+            for y in 0..8
+                for x in 0..8
+                    m.push(cu * cv / 4.0 * c[(2 * y + 1) * u % 32] * c[(2 * x + 1) * v % 32])
+    m
+
+fn u16(d List[int], at int) int
+    d[at] * 256 + d[at + 1]
+
+## Decodes a baseline (or extended sequential, Huffman) JPEG to grey: the
+## luma of YCbCr, the grey of one component, or RGB's weighted sum.
+pub fn jpeg(d List[int]) Gray ! ImageError
+    if d.len() < 4 or d[0] != 0xff or d[1] != 0xd8
+        return Bad(why: "no JPEG start of image")
+    mut qt := [List[int]() for _ in 0..4]
+    mut dc := [Huff(lut: []) for _ in 0..4]
+    mut ac := [Huff(lut: []) for _ in 0..4]
+    mut comps := List[Comp]()
+    mut w := 0
+    mut h := 0
+    mut ri := 0
+    mut transform := -1
+    mut planes := List[List[float]]()
+    mut strides := List[int]()
+    mut p := 2
+    while p + 4 <= d.len()
+        if d[p] != 0xff
+            p += 1
+            continue
+        m := d[p + 1]
+        if m == 0xd8 or m == 0x01 or (m >= 0xd0 and m <= 0xd7) or m == 0xff
+            p += if m == 0xff then 1 else 2
+            continue
+        if m == 0xd9
+            break
+        n := u16(d, p + 2)
+        s := p + 4
+        e := p + 2 + n
+        if e > d.len()
+            return Bad(why: "JPEG segment runs past the end")
+        if m == 0xc2 or m == 0xc6 or m == 0xca
+            return Unsupported(what: "progressive JPEG")
+        if m == 0xc3 or (m >= 0xc5 and m <= 0xcf and m != 0xc8 and m != 0xcc)
+            return Unsupported(what: "JPEG process {m.to_hex()}")
+        if m == 0xc0 or m == 0xc1
+            h = u16(d, s + 1)
+            w = u16(d, s + 3)
+            nc := d[s + 5]
+            for i in 0..nc
+                q := s + 6 + i * 3
+                comps.push(Comp(
+                    id: d[q],
+                    h: d[q + 1].shr(4),
+                    v: d[q + 1].bit_and(15),
+                    tq: d[q + 2],
+                    td: 0,
+                    ta: 0,
+                ))
+            planes = [List[float]() for _ in comps]
+            strides = [0 for _ in comps]
+        elif m == 0xc4
+            mut q := s
+            while q < e
+                tc := d[q].shr(4)
+                th := d[q].bit_and(3)
+                counts := d[q + 1..q + 17]
+                total := counts.sum()
+                t := huff_table(counts, d[q + 17..q + 17 + total])
+                if tc == 0
+                    dc[th] = t
+                else
+                    ac[th] = t
+                q += 17 + total
+        elif m == 0xdb
+            mut q := s
+            while q < e
+                prec := d[q].shr(4)
+                tq := d[q].bit_and(3)
+                if prec == 0
+                    qt[tq] = d[q + 1..q + 65]
+                    q += 65
+                else
+                    qt[tq] = [u16(d, q + 1 + 2 * i) for i in 0..64]
+                    q += 129
+        elif m == 0xdd
+            ri = u16(d, s)
+        elif m == 0xee and n >= 12
+            transform = d[s + 11]
+        elif m == 0xda
+            if comps.len() == 0
+                return Bad(why: "JPEG scan before the frame header")
+            ns := d[s]
+            mut sel := List[int]()
+            for i in 0..ns
+                id := d[s + 1 + i * 2]
+                for ci in 0..comps.len()
+                    if comps[ci].id == id
+                        comps[ci].td = d[s + 2 + i * 2].shr(4)
+                        comps[ci].ta = d[s + 2 + i * 2].bit_and(15)
+                        sel.push(ci)
+            mut bits := JBits(data: d, pos: e, buf: 0, cnt: 0, marker: false)
+            scan(mut bits, comps, sel, qt, dc, ac, w, h, ri, mut planes, mut strides)?
+            p = bits.pos
+            continue
+        p = e
+    if comps.len() == 0
+        return Bad(why: "no JPEG frame")
+    to_gray(comps, planes, strides, w, h, transform)
+
+## Decodes one scan's blocks into the selected components' coefficient
+## planes, then runs the inverse DCT on each plane as one matrix product.
+fn scan(
+    mut b JBits,
+    comps List[Comp],
+    sel List[int],
+    qt List[List[int]],
+    dc List[Huff],
+    ac List[Huff],
+    w int,
+    h int,
+    ri int,
+    mut planes List[List[float]],
+    mut strides List[int],
+) ! ImageError
+    hmax := [c.h for c in comps].max() else 1
+    vmax := [c.v for c in comps].max() else 1
+    mcux := (w + 8 * hmax - 1) / (8 * hmax)
+    mcuy := (h + 8 * vmax - 1) / (8 * vmax)
+    mut coefs := [List[float]() for _ in comps]
+    mut nblocks := [0 for _ in comps]
+    mut pred := [0 for _ in comps]
+    single := sel.len() == 1
+    mut units := List[List[int]]()
+    if single
+        c := comps[sel[0]]
+        bw := ((w * c.h + hmax - 1) / hmax + 7) / 8
+        bh := ((h * c.v + vmax - 1) / vmax + 7) / 8
+        strides[sel[0]] = bw
+        for by in 0..bh
+            for bx in 0..bw
+                units.push([sel[0], bx, by])
+    else
+        for ci in sel
+            strides[ci] = mcux * comps[ci].h
+        for my in 0..mcuy
+            for mx in 0..mcux
+                for ci in sel
+                    c := comps[ci]
+                    for v in 0..c.v
+                        for u in 0..c.h
+                            units.push([ci, mx * c.h + u, my * c.v + v])
+    per_mcu := if single then 1 else [comps[ci].h * comps[ci].v for ci in sel].sum()
+    # Block coefficients go to their place in the plane's block grid.
+    mut grids := [Map[int, List[float]]() for _ in comps]
+    mut count := 0
+    for unit in units
+        if ri > 0 and count > 0 and count % (ri * per_mcu) == 0
+            b.restart()
+            pred = [0 for _ in comps]
+        count += 1
+        ci := unit[0]
+        c := comps[ci]
+        q := qt[c.tq]
+        mut blk := [0.0 for _ in 0..64]
+        t := b.decode(dc[c.td])?
+        pred[ci] += extend(b.bits(t), t)
+        blk[0] = (pred[ci] * q[0]).to_float()
+        mut k := 1
+        while k < 64
+            rs := b.decode(ac[c.ta])?
+            r := rs.shr(4)
+            sz := rs.bit_and(15)
+            if sz == 0
+                if r == 15
+                    k += 16
+                    continue
+                break
+            k += r
+            if k > 63
+                break
+            blk[ZIGZAG[k]] = (extend(b.bits(sz), sz) * q[k]).to_float()
+            k += 1
+        grids[ci][unit[2] * 65536 + unit[1]] = blk
+        nblocks[ci] += 1
+    for ci in sel
+        planes[ci] = idct_plane(grids[ci], strides[ci])
+    while b.pos < b.data.len() and not b.marker
+        b.fill()
+        b.cnt = 0
+
+## Pixels of a block grid, `stride` blocks wide, as a plane of floats.
+fn idct_plane(grid Map[int, List[float]], stride int) List[float]
+    keys := grid.keys().sorted()
+    if keys.len() == 0
+        return []
+    rows := keys[keys.len() - 1] / 65536 + 1
+    mut flat := List[float]()
+    for by in 0..rows
+        for bx in 0..stride
+            flat.extend(grid.get(by * 65536 + bx) else [0.0 for _ in 0..64])
+    n := rows * stride
+    out := tensor.from(flat, [n, 64]).matmul(tensor.from(IDCT, [64, 64])).to_list()
+    mut plane := [0.0 for _ in 0..n * 64]
+    pw := stride * 8
+    for bi in 0..n
+        bx := bi % stride
+        by := bi / stride
+        for y in 0..8
+            row := (by * 8 + y) * pw + bx * 8
+            for x in 0..8
+                plane[row + x] = out[bi * 64 + y * 8 + x] + 128.0
+    plane
+
+fn clamp(v float) int
+    v.round().to_int().max(0).min(255)
+
+fn to_gray(
+    comps List[Comp],
+    planes List[List[float]],
+    strides List[int],
+    w int,
+    h int,
+    transform int,
+) Gray ! ImageError
+    hmax := [c.h for c in comps].max() else 1
+    vmax := [c.v for c in comps].max() else 1
+    mut px := List[int]()
+    rgb := comps.len() == 3 and transform == 0
+    if comps.len() == 4
+        return Unsupported(what: "four-component (CMYK) JPEG")
+    for y in 0..h
+        for x in 0..w
+            if rgb
+                mut v := List[float]()
+                for ci in 0..3
+                    c := comps[ci]
+                    sx := x * c.h / hmax
+                    sy := y * c.v / vmax
+                    v.push(planes[ci][sy * strides[ci] * 8 + sx])
+                px.push(clamp(v[0] * 0.299 + v[1] * 0.587 + v[2] * 0.114))
+            else
+                c := comps[0]
+                sx := x * c.h / hmax
+                sy := y * c.v / vmax
+                px.push(clamp(planes[0][sy * strides[0] * 8 + sx]))
+    Gray(width: w, height: h, px: px)
+
+## A PGM (P5) file of the image, for looking at what a decoder produced.
+pub fn Gray.pgm(self) List[int]
+    mut out := [c.code() for c in "P5\n{width} {height}\n255\n".chars()]
+    out.extend(px)
+    out
+
+@test fn fax_tables_are_prefix_free()
+    for t in ["{WHITE_CODES} {EXT_CODES}", "{BLACK_CODES} {EXT_CODES}", MODE_CODES]
+        codes := [w.split("=")[0] for w in t.replace("\n", " ").split(" ") if w != ""]
+        for a in codes
+            for b in codes
+                if a != b
+                    assert(not b.starts_with(a))
+
+@test fn decodes_a_group_4_row() !
+    # 16 pixels, 4 white, 8 black, 4 white, under an all-white reference
+    # row: horizontal mode (001) with white 4 (1011) and black 8 (000101),
+    # then vertical 0 (1) to the row's end.
+    mut data := List[int]()
+    mut v := 0
+    mut n := 0
+    for c in "001101100010110000000".chars()
+        v = v * 2 + (if c == '1' then 1 else 0)
+        n += 1
+        if n == 8
+            data.push(v)
+            v = 0
+            n = 0
+    g := ccitt(data, 16, 1, -1, false, false)?
+    assert_eq(g.px, [255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255])
+
+@test fn reads_samples() !
+    g := from_samples([0b10100000, 0b01000000], 3, 2, 1, 1)?
+    assert_eq(g.px, [255, 0, 255, 0, 255, 0])
+    rgb := from_samples([255, 0, 0, 0, 0, 255], 2, 1, 8, 3)?
+    assert_eq(rgb.px, [76, 29])

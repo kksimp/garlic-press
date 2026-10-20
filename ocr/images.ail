@@ -1,0 +1,103 @@
+## A painted image as a grey bitmap: the image dictionary (8.9.5) picks
+## the codec and how samples become grey.
+
+use image
+use reader
+
+fn bad(e image.ImageError) reader.PdfError
+    match e
+        Bad(why) => reader.PdfError.Bad(why: why)
+        Unsupported(what) => reader.PdfError.Unsupported(what: what)
+
+## The components per sample of a colour space, and for Indexed its
+## palette and base components (8.6).
+struct Space
+    comps int
+    palette List[int]
+    base int
+    ink bool
+
+fn space_of(doc reader.Doc, cs reader.Obj) Space
+    o := doc.resolve(cs)
+    if n := o.as_name()
+        return named(n)
+    a := o.as_arr() else return named("DeviceGray")
+    if a.len() == 0
+        return named("DeviceGray")
+    kind := doc.resolve(a[0]).as_name() else ""
+    if kind == "ICCBased" and a.len() > 1
+        s := doc.resolve(a[1])
+        d := match s
+            Stream(d, start, len) => d
+            Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Op => {}
+        n := doc.key(d, "N").as_int() else 1
+        return Space(comps: n, palette: [], base: 0, ink: false)
+    if (kind == "Indexed" or kind == "I") and a.len() > 3
+        base := space_of(doc, a[1])
+        look := doc.resolve(a[3])
+        pal := look.as_bytes() else (doc.stream_data(look) else [])
+        return Space(comps: 1, palette: pal, base: base.comps, ink: false)
+    if kind == "Separation" or kind == "DeviceN"
+        n := if kind == "DeviceN" then(doc.resolve(a[1]).as_arr() else []).len().max(1) else 1
+        return Space(comps: n, palette: [], base: 0, ink: true)
+    if kind == "CalRGB" or kind == "Lab"
+        return named("DeviceRGB")
+    named("DeviceGray")
+
+fn named(n str) Space
+    mut comps := 1
+    if n == "DeviceRGB" or n == "RGB"
+        comps = 3
+    elif n == "DeviceCMYK" or n == "CMYK"
+        comps = 4
+    Space(comps: comps, palette: [], base: 0, ink: false)
+
+## The grey bitmap of an image XObject or inline image's stream.
+pub fn gray_of(doc reader.Doc, obj reader.Obj) image.Gray ! reader.PdfError
+    d := match obj
+        Stream(d, start, len) => d
+        Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Op => return reader.PdfError.Bad(why: "an image that is not a stream")
+    w := doc.key(d, "Width").as_int() else 0
+    h := doc.key(d, "Height").as_int() else 0
+    mask := doc.key(d, "ImageMask").as_bool() else false
+    bpc := if mask then 1 else (doc.key(d, "BitsPerComponent").as_int() else 8)
+    dec := doc.key(d, "Decode").as_arr() else []
+    flip := dec.len() >= 2
+        and (doc.resolve(dec[0]).as_num() else 0.0) > (doc.resolve(dec[1]).as_num() else 0.0)
+    e := doc.image_stream(obj)?
+    g := decode(doc, d, e, w, h, bpc, mask)?
+    if flip then g.inverted() else g
+
+fn decode(
+    doc reader.Doc,
+    d Map[str, reader.Obj],
+    e reader.Encoded,
+    w int,
+    h int,
+    bpc int,
+    mask bool,
+) image.Gray ! reader.PdfError
+    p := e.parms
+    if e.codec == "CCITTFaxDecode" or e.codec == "CCF"
+        k := doc.key(p, "K").as_int() else 0
+        cols := doc.key(p, "Columns").as_int() else 1728
+        rows := doc.key(p, "Rows").as_int() else h
+        align := doc.key(p, "EncodedByteAlign").as_bool() else false
+        black1 := doc.key(p, "BlackIs1").as_bool() else false
+        r := image.ccitt(e.data, cols, rows, k, align, black1) else err
+            return bad(err)
+        return r
+    if e.codec == "DCTDecode" or e.codec == "DCT"
+        r := image.jpeg(e.data) else err
+            return bad(err)
+        return r
+    if e.codec != ""
+        return reader.PdfError.Unsupported(what: "{e.codec} images")
+    sp := if mask then named("DeviceGray") else space_of(doc, doc.key(d, "ColorSpace"))
+    if sp.palette.len() > 0
+        r := image.from_indexed(e.data, w, h, bpc, sp.palette, sp.base) else err
+            return bad(err)
+        return r
+    s := image.from_samples(e.data, w, h, bpc, sp.comps) else err
+        return bad(err)
+    if sp.ink then s.inverted() else s

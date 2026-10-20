@@ -10,8 +10,11 @@
 ##     ail run tools/pdf/pdf.ail view FILE [--page N] [--find TEXT] [--print] [--cols N]
 
 use std.env
+use std.fs
 use std.io
 use std.time
+use image
+use ocr
 use reader
 use view
 
@@ -23,6 +26,7 @@ USAGE := """
       info FILE                             pages, metadata, and what could not be read
       outline FILE                          the bookmarks, with their pages
       bench FILE                            the time each stage of reading takes
+      images FILE [--page N] [--out F.pgm]  the page's images, decoded; --out saves the largest
       view FILE [--page N] [--find TEXT] [--print] [--cols N]
                                             the text layer in a window; --print shows it here
     """
@@ -175,6 +179,25 @@ fn bench_cmd(a Args) ! reader.PdfError
     print("{path}: {buf.len()} bytes, {pages.len()} pages, {lines} lines")
     print("read {t1 - t0} ms, open {t2 - t1} ms, pages {t3 - t2} ms, search \"the\" {t4 - t3} ms ({hits} hits)")
 
+## `images`: decodes each image painted on the chosen pages, with its
+## size and the decode time; `--out` saves the largest as a PGM file.
+fn images_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "images needs a FILE")
+    doc := open_doc(path)?
+    mut best := image.Gray.new(0, 0, 0)
+    for p in chosen(doc, a)?
+        for pl in p.placed
+            t0 := time.now_ms()
+            g := ocr.gray_of(doc, pl.obj) else err
+                print("page {p.model.page}: {err}")
+                continue
+            print("page {p.model.page}: {g.width}x{g.height} in {time.now_ms() - t0} ms")
+            if g.width * g.height > best.width * best.height
+                best = g
+    if out := a.flags.get("--out")
+        fs.write_bytes(out, bytes.from_list([v.to_u8() for v in best.pgm()])) else err
+            return reader.PdfError.Io(why: "can't write {out}: {err}")
+
 fn main()
     a := parse_args(env.args())
     cmd := a.words.first() else ""
@@ -199,6 +222,10 @@ fn main()
             io.exit(2)
     elif cmd == "bench"
         bench_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "images"
+        images_cmd(a) else err
             io.eprint("pdf: {err}")
             io.exit(2)
     elif cmd == "outline"

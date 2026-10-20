@@ -56,6 +56,8 @@ pub fn r2(x float) float
 pub struct Page
     pub model PageModel
     pub lines List[Line]
+    ## The images the page paints, not decoded until OCR asks.
+    pub placed List[Placed]
 
 ## PDFDocEncoding codes 0x80..0xA0 (Annex D.2); the rest is Latin-1.
 PDFDOC_HIGH := [
@@ -327,7 +329,7 @@ pub fn Doc.read_page(self, p Map[str, Obj], number int, nums Map[int, int]) Page
         for x in (key(p, "CropBox").as_arr() else (key(p, "MediaBox").as_arr() else []))
     ]
     box := if mb.len() == 4 then mb else [0.0, 0.0, 612.0, 792.0]
-    pt := page_glyphs(p) else PageText(glyphs: [], images: 0)
+    pt := page_glyphs(p) else PageText(glyphs: [], images: 0, placed: [])
     lines := [shift(l, box[0], box[1]) for l in lines_of(pt.glyphs)]
     mut unreadable := 0
     for g in pt.glyphs
@@ -348,7 +350,7 @@ pub fn Doc.read_page(self, p Map[str, Obj], number int, nums Map[int, int]) Page
         unreadable: unreadable,
         image_only: pt.images > 0 and pt.glyphs.len() == 0,
     )
-    Page(model: model, lines: lines)
+    Page(model: model, lines: lines, placed: pt.placed)
 
 ## A US Letter page of left-aligned 10 pt lines 14 pt apart from the top,
 ## 5 pt per character: for tests of what reads pages.
@@ -377,7 +379,7 @@ pub fn text_page(number int, texts List[str]) Page
         unreadable: 0,
         image_only: false,
     )
-    Page(model: m, lines: lines)
+    Page(model: m, lines: lines, placed: [])
 
 @test fn decodes_text_strings()
     assert_eq(text_string([0xfe, 0xff, 0, 0x48, 0, 0xe9]), "H\u{e9}")
