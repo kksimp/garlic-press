@@ -8,6 +8,7 @@
 use std.ui
 use std.ui.widgets
 use std.io
+use ocr
 use reader
 
 PAPER_BG := 0xf4f1ea
@@ -30,6 +31,8 @@ pub struct Layout
 pub struct Viewer
     pub path str
     pages reader.Pages
+    ## Scanned pages are read by OCR when shown or searched.
+    reader_ocr ocr.Ocr
     pub page int
     pub top int
     pub cols int
@@ -43,9 +46,13 @@ pub struct Viewer
     layouts Map[int, Layout]
 
 pub fn Viewer.new(path str, pages reader.Pages, cols int, rows int) Viewer
+    with_ocr(path, pages, cols, rows, ocr.Ocr.new(true))
+
+pub fn with_ocr(path str, pages reader.Pages, cols int, rows int, o ocr.Ocr) Viewer
     Viewer(
         path: path,
         pages: pages,
+        reader_ocr: o,
         page: 0,
         top: 0,
         cols: cols,
@@ -141,7 +148,7 @@ fn overlaps(spans List[List[int]], a int, b int) bool
 fn Viewer.layout_of(mut self, i int) Layout
     if l := layouts.get(i)
         return l
-    l := layout(pages.get(i), cols - 2)
+    l := layout(reader_ocr.page(pages, i), cols - 2)
     layouts[i] = l
     l
 
@@ -165,7 +172,7 @@ fn Viewer.seek(mut self, from int, dir int, last bool) bool
     n := pages.count()
     for k in 0..n
         i := ((from + dir * k) % n + n) % n
-        hs := reader.search_page(pages.get(i), query, false)
+        hs := reader.search_page(reader_ocr.page(pages, i), query, false)
         if hs.len() > 0
             hits = hs
             go_hit(if last then hs.len() - 1 else 0)
@@ -269,9 +276,11 @@ fn Viewer.hit_at(self, pi int, li int, ci int) int
 pub fn Viewer.render(mut self) List[widgets.Run]
     mut runs := List[widgets.Run]()
     l := layout_of(page)
-    pm := pages.get(page).model
+    pm := reader_ocr.page(pages, page).model
     title := " {base(path)}  page {page + 1}/{pages.count()}"
-    note := if pm.image_only then "  image-only page: a scan, no text without OCR" else ""
+    mut note := if pm.image_only then "  image-only page: a scan, no text without OCR" else ""
+    if pm.ocr
+        note = "  scan, read by OCR"
     runs.push(bar(0, "{title}{note}", cols))
     body := body_rows()
     left := ((cols - l.width) / 2).max(0)
@@ -342,7 +351,7 @@ fn base(path str) str
 ## its hits, and the visible text rows.
 pub fn Viewer.state_json(mut self) Json
     l := layout_of(page)
-    pm := pages.get(page).model
+    pm := reader_ocr.page(pages, page).model
     shown := [l.rows[i] for i in top..(top + body_rows()).min(l.rows.len())]
     mut m := List[JsonMember]()
     m.push(JsonMember(key: "file", value: Json.Str(path)))
@@ -389,11 +398,12 @@ pub fn start(path str, pages reader.Pages, flags Map[str, str])
     if pages.count() == 0
         io.eprint("pdf: {path} has no pages")
         return
+    o := ocr.Ocr.new(not flags.contains("--no-ocr"))
     start_page := ((flags.get("--page") else "1").to_int() else 1).max(1).min(pages.count()) - 1
-    need := (natural_width(pages.get(start_page)) + 2).max(20)
+    need := (natural_width(o.page(pages, start_page)) + 2).max(20)
     cols := (flags.get("--cols") else "").to_int() else need.min(180)
     rows := (flags.get("--rows") else "40").to_int() else 40
-    mut v := Viewer.new(path, pages, cols, rows)
+    mut v := with_ocr(path, pages, cols, rows, o)
     v.go_page(start_page)
     if q := flags.get("--find")
         v.find(q)

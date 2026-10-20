@@ -1,0 +1,406 @@
+## TrueType fonts: outlines from the `glyf` table and an anti-aliased
+## rasterizer that accumulates each edge's signed area per pixel and sums
+## it along the row (non-zero fill), written from the OpenType
+## specification (ADR 0513). Moves beside `std.ui` as `std.ui.font`.
+
+## A parsed font: table offsets and the numbers every lookup needs.
+pub struct Font
+    data List[int]
+    tables Map[str, int]
+    pub units int
+    long_loca bool
+    pub glyphs int
+    metrics int
+    cmap int
+    cmap_format int
+    pub ascent int
+    pub descent int
+
+fn chr(b int) char
+    char.from_code(b) else '?'
+
+fn i16(d List[int], at int) int
+    v := u16(d, at)
+    if v >= 32768 then v - 65536 else v
+
+fn u32(d List[int], at int) int
+    u16(d, at) * 65536 + u16(d, at + 2)
+
+pub fn Font.parse(data List[int]) Font ! ImageError
+    if data.len() < 12
+        return Bad(why: "too short for a font")
+    tag := u32(data, 0)
+    if tag != 0x00010000 and tag != 0x74727565
+        return Unsupported(what: "fonts other than TrueType outlines")
+    n := u16(data, 4)
+    mut tables := Map[str, int]()
+    for i in 0..n
+        r := 12 + i * 16
+        name := "{chr(data[r])}{chr(data[r + 1])}{chr(data[r + 2])}{chr(data[r + 3])}"
+        tables[name] = u32(data, r + 8)
+    for t in ["head", "maxp", "cmap", "hhea", "hmtx", "loca", "glyf"]
+        if not tables.contains(t)
+            return Bad(why: "no {t} table")
+    head := tables["head"]
+    hhea := tables["hhea"]
+    mut f := Font(
+        data: data,
+        tables: tables,
+        units: u16(data, head + 18),
+        long_loca: i16(data, head + 50) == 1,
+        glyphs: u16(data, tables["maxp"] + 4),
+        metrics: u16(data, hhea + 34),
+        cmap: 0,
+        cmap_format: 0,
+        ascent: i16(data, hhea + 4),
+        descent: i16(data, hhea + 6),
+    )
+    # The Unicode subtable: full repertoire (format 12) over BMP (format 4).
+    c := tables["cmap"]
+    for i in 0..u16(data, c + 2)
+        r := c + 4 + i * 8
+        pid := u16(data, r)
+        eid := u16(data, r + 2)
+        sub := c + u32(data, r + 4)
+        fmt := u16(data, sub)
+        unicode := pid == 0 or (pid == 3 and (eid == 1 or eid == 10))
+        if unicode and (fmt == 12 or (fmt == 4 and f.cmap_format != 12))
+            f.cmap = sub
+            f.cmap_format = fmt
+    if f.cmap_format == 0
+        return Unsupported(what: "fonts without a Unicode cmap")
+    f
+
+## The glyph index of a character, 0 (the missing glyph) when absent.
+pub fn Font.glyph(self, ch char) int
+    code := ch.code()
+    d := data
+    s := cmap
+    if cmap_format == 12
+        for i in 0..u32(d, s + 12)
+            g := s + 16 + i * 12
+            if code >= u32(d, g) and code <= u32(d, g + 4)
+                return u32(d, g + 8) + code - u32(d, g)
+        return 0
+    if code > 0xffff
+        return 0
+    segs := u16(d, s + 6) / 2
+    ends := s + 14
+    starts := ends + segs * 2 + 2
+    deltas := starts + segs * 2
+    ranges := deltas + segs * 2
+    for i in 0..segs
+        if code <= u16(d, ends + i * 2)
+            start := u16(d, starts + i * 2)
+            if code < start
+                return 0
+            delta := u16(d, deltas + i * 2)
+            ro := u16(d, ranges + i * 2)
+            if ro == 0
+                return (code + delta) % 65536
+            at := ranges + i * 2 + ro + (code - start) * 2
+            g := u16(d, at)
+            return if g == 0 then 0 else (g + delta) % 65536
+    0
+
+## A glyph's advance width in font units.
+pub fn Font.advance(self, gid int) int
+    i := gid.min(metrics - 1)
+    u16(data, tables["hmtx"] + i * 4)
+
+fn Font.glyph_at(self, gid int) int
+    loca := tables["loca"]
+    glyf := tables["glyf"]
+    if gid >= glyphs
+        return -1
+    a := if long_loca then u32(data, loca + gid * 4) else u16(data, loca + gid * 2) * 2
+    b := if long_loca then u32(data, loca + gid * 4 + 4) else u16(data, loca + gid * 2 + 2) * 2
+    if a == b then - 1 else glyf + a
+
+## A glyph's outline in font units, y up: quadratic pieces
+## `[x0, y0, cx, cy, x1, y1]` (straight edges have their control point
+## halfway).
+pub fn Font.outline(self, gid int) List[List[float]]
+    mut out := List[List[float]]()
+    add_glyph(gid, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], mut out, 0)
+    out
+
+fn Font.add_glyph(self, gid int, m List[float], mut out List[List[float]], depth int)
+    at := glyph_at(gid)
+    if at < 0 or depth > 8
+        return
+    d := data
+    n := i16(d, at)
+    if n < 0
+        add_composite(at + 10, m, mut out, depth)
+        return
+    ends := [u16(d, at + 10 + i * 2) for i in 0..n]
+    count := if n > 0 then ends[n - 1] + 1 else 0
+    mut p := at + 10 + n * 2
+    p += 2 + u16(d, p)
+    mut flags := List[int]()
+    while flags.len() < count
+        fl := d[p]
+        p += 1
+        flags.push(fl)
+        if fl.bit_and(8) != 0
+            rep := d[p]
+            p += 1
+            for _ in 0..rep
+                flags.push(fl)
+    mut xs := List[int]()
+    mut v := 0
+    for fl in flags
+        if fl.bit_and(2) != 0
+            dx := d[p]
+            p += 1
+            v += if fl.bit_and(16) != 0 then dx else -dx
+        elif fl.bit_and(16) == 0
+            v += i16(d, p)
+            p += 2
+        xs.push(v)
+    mut ys := List[int]()
+    v = 0
+    for fl in flags
+        if fl.bit_and(4) != 0
+            dy := d[p]
+            p += 1
+            v += if fl.bit_and(32) != 0 then dy else -dy
+        elif fl.bit_and(32) == 0
+            v += i16(d, p)
+            p += 2
+        ys.push(v)
+    mut first := 0
+    for e in ends
+        contour(xs[first..e + 1], ys[first..e + 1], flags[first..e + 1], m, mut out)
+        first = e + 1
+
+## One closed contour: consecutive off-curve points imply an on-curve
+## point halfway between them.
+fn contour(xs List[int], ys List[int], flags List[int], m List[float], mut out List[List[float]])
+    n := xs.len()
+    if n < 2
+        return
+    mut px := List[float]()
+    mut py := List[float]()
+    mut on := List[bool]()
+    for i in 0..n
+        x := xs[i].to_float()
+        y := ys[i].to_float()
+        px.push(m[0] * x + m[2] * y + m[4])
+        py.push(m[1] * x + m[3] * y + m[5])
+        on.push(flags[i].bit_and(1) != 0)
+    # Start at an on-curve point, or the midpoint of the first two.
+    mut s := -1
+    for i in 0..n
+        if on[i]
+            s = i
+            break
+    mut sx := 0.0
+    mut sy := 0.0
+    if s < 0
+        sx = (px[0] + px[1]) / 2.0
+        sy = (py[0] + py[1]) / 2.0
+        s = 0
+    else
+        sx = px[s]
+        sy = py[s]
+    mut cx := sx
+    mut cy := sy
+    mut ctrl := false
+    mut qx := 0.0
+    mut qy := 0.0
+    for k in 1..n + 1
+        i := (s + k) % n
+        if on[i]
+            if ctrl
+                out.push([cx, cy, qx, qy, px[i], py[i]])
+            else
+                out.push([cx, cy, (cx + px[i]) / 2.0, (cy + py[i]) / 2.0, px[i], py[i]])
+            cx = px[i]
+            cy = py[i]
+            ctrl = false
+        elif ctrl
+            mx := (qx + px[i]) / 2.0
+            my := (qy + py[i]) / 2.0
+            out.push([cx, cy, qx, qy, mx, my])
+            cx = mx
+            cy = my
+            qx = px[i]
+            qy = py[i]
+        else
+            qx = px[i]
+            qy = py[i]
+            ctrl = true
+    if ctrl
+        out.push([cx, cy, qx, qy, sx, sy])
+    elif cx != sx or cy != sy
+        out.push([cx, cy, (cx + sx) / 2.0, (cy + sy) / 2.0, sx, sy])
+
+fn f2dot14(d List[int], at int) float
+    i16(d, at).to_float() / 16384.0
+
+fn Font.add_composite(self, start int, m List[float], mut out List[List[float]], depth int)
+    d := data
+    mut p := start
+    while true
+        fl := u16(d, p)
+        gid := u16(d, p + 2)
+        p += 4
+        mut dx := 0.0
+        mut dy := 0.0
+        if fl.bit_and(1) != 0
+            dx = i16(d, p).to_float()
+            dy = i16(d, p + 2).to_float()
+            p += 4
+        else
+            dx = (if d[p] >= 128 then d[p] - 256 else d[p]).to_float()
+            dy = (if d[p + 1] >= 128 then d[p + 1] - 256 else d[p + 1]).to_float()
+            p += 2
+        if fl.bit_and(2) == 0
+            dx = 0.0
+            dy = 0.0
+        mut a := 1.0
+        mut b := 0.0
+        mut c := 0.0
+        mut e := 1.0
+        if fl.bit_and(8) != 0
+            a = f2dot14(d, p)
+            e = a
+            p += 2
+        elif fl.bit_and(0x40) != 0
+            a = f2dot14(d, p)
+            e = f2dot14(d, p + 2)
+            p += 4
+        elif fl.bit_and(0x80) != 0
+            a = f2dot14(d, p)
+            b = f2dot14(d, p + 2)
+            c = f2dot14(d, p + 4)
+            e = f2dot14(d, p + 6)
+            p += 8
+        # The child's matrix, then the parent's.
+        child := [
+            a * m[0] + b * m[2],
+            a * m[1] + b * m[3],
+            c * m[0] + e * m[2],
+            c * m[1] + e * m[3],
+            dx * m[0] + dy * m[2] + m[4],
+            dx * m[1] + dy * m[3] + m[5],
+        ]
+        add_glyph(gid, child, mut out, depth + 1)
+        if fl.bit_and(0x20) == 0
+            break
+
+## A coverage canvas: each pixel's ink from 0 to 1, y down.
+pub struct Canvas
+    pub width int
+    pub height int
+    acc List[float]
+
+pub fn Canvas.new(width int, height int) Canvas
+    Canvas(width: width, height: height, acc: [0.0 for _ in 0..(width + 2) * height])
+
+## Adds one edge's signed area to the pixels it crosses.
+fn Canvas.line(mut self, ax float, ay float, bx float, by float)
+    if ay == by
+        return
+    mut dir := 1.0
+    mut x0 := ax
+    mut y0 := ay
+    mut x1 := bx
+    mut y1 := by
+    if ay > by
+        dir = -1.0
+        x0 = bx
+        y0 = by
+        x1 = ax
+        y1 = ay
+    dxdy := (x1 - x0) / (y1 - y0)
+    mut x := x0
+    if y0 < 0.0
+        x -= y0 * dxdy
+    stride := width + 2
+    top := y0.max(0.0).floor().to_int()
+    bottom := y1.ceil().to_int().min(height)
+    for y in top..bottom
+        row := y * stride
+        yf := y.to_float()
+        dy := (yf + 1.0).min(y1) - yf.max(y0)
+        xnext := x + dxdy * dy
+        d := dy * dir
+        lo := x.min(xnext).max(0.0)
+        hi := x.max(xnext).max(0.0)
+        lo_floor := lo.floor()
+        li := lo_floor.to_int().min(width)
+        hi_ceil := hi.ceil()
+        hiI := hi_ceil.to_int().min(width)
+        if hiI <= li + 1
+            mid := 0.5 * (x + xnext) - lo_floor
+            acc[row + li] += d - d * mid
+            acc[row + li + 1] += d * mid
+        else
+            s := 1.0 / (hi - lo)
+            lf := lo - lo_floor
+            a0 := 0.5 * s * (1.0 - lf) * (1.0 - lf)
+            hf := hi - hi_ceil + 1.0
+            am := 0.5 * s * hf * hf
+            acc[row + li] += d * a0
+            if hiI == li + 2
+                acc[row + li + 1] += d * (1.0 - a0 - am)
+            else
+                a1 := s * (1.5 - lf)
+                acc[row + li + 1] += d * (a1 - a0)
+                for xi in li + 2..hiI - 1
+                    acc[row + xi] += d * s
+                a2 := a1 + (hiI - li - 3).to_float() * s
+                acc[row + hiI - 1] += d * (1.0 - a2 - am)
+            acc[row + hiI] += d * am
+        x = xnext
+
+## Fills glyph `gid` with its origin at pixel (`x`, `y`) (the baseline),
+## `px` pixels to the em.
+pub fn Canvas.glyph(mut self, f Font, gid int, x float, y float, px float)
+    k := px / f.units.to_float()
+    for q in f.outline(gid)
+        x0 := x + q[0] * k
+        y0 := y - q[1] * k
+        cx := x + q[2] * k
+        cy := y - q[3] * k
+        x1 := x + q[4] * k
+        y1 := y - q[5] * k
+        # Enough straight pieces that each strays under a tenth of a pixel.
+        dev := ((x0 - 2.0 * cx + x1).abs() + (y0 - 2.0 * cy + y1).abs()) / 4.0
+        n := (dev * 10.0).sqrt().ceil().to_int().max(1).min(16)
+        mut px0 := x0
+        mut py0 := y0
+        for i in 1..n + 1
+            t := i.to_float() / n.to_float()
+            u := 1.0 - t
+            qx := u * u * x0 + 2.0 * u * t * cx + t * t * x1
+            qy := u * u * y0 + 2.0 * u * t * cy + t * t * y1
+            line(px0, py0, qx, qy)
+            px0 = qx
+            py0 = qy
+
+## Draws `text` from (`x`, `y`) on the baseline and returns the pen's x
+## after it; `track` adds space after each glyph, in pixels.
+pub fn Canvas.text(mut self, f Font, text str, x float, y float, px float, track float) float
+    mut pen := x
+    k := px / f.units.to_float()
+    for ch in text.chars()
+        gid := f.glyph(ch)
+        glyph(f, gid, pen, y, px)
+        pen += f.advance(gid).to_float() * k + track
+    pen
+
+## The ink so far as a grey bitmap: 0 where covered, 255 where bare.
+pub fn Canvas.gray(self) Gray
+    mut px := List[int]()
+    stride := width + 2
+    for y in 0..height
+        mut a := 0.0
+        row := y * stride
+        for x in 0..width
+            a += acc[row + x]
+            px.push(255 - (a.abs().min(1.0) * 255.0).round().to_int())
+    Gray(width: width, height: height, px: px)

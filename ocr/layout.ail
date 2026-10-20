@@ -1,0 +1,339 @@
+## From a grey page image to glyph shapes in lines and words (ADR 0512):
+## threshold, black runs per row, connected components over the runs,
+## lines by vertical overlap, and words by the gaps between glyphs. The
+## work is per run and per component, not per pixel, after the threshold.
+
+use image
+
+## A black run on row `y`, from `x0` up to but not including `x1`.
+pub struct Run
+    pub y int
+    pub x0 int
+    pub x1 int
+
+## A glyph's ink: its box (`x1`, `y1` exclusive) and runs.
+pub struct Blob
+    pub x0 int
+    pub y0 int
+    pub x1 int
+    pub y1 int
+    pub runs List[Run]
+
+pub fn Blob.w(self) int
+    x1 - x0
+
+pub fn Blob.h(self) int
+    y1 - y0
+
+## A line of glyphs, left to right; `base` is the baseline row and `size`
+## the height from it to the tops of tall letters. `words` holds the glyph
+## index each word starts at.
+pub struct GlyphLine
+    pub glyphs List[Blob]
+    pub words List[int]
+    pub base int
+    pub size int
+    pub x0 int
+    pub y0 int
+    pub x1 int
+    pub y1 int
+
+## The grey level that best splits ink from paper (Otsu's method).
+pub fn threshold(g image.Gray) int
+    mut hist := [0 for _ in 0..256]
+    for p in g.px
+        hist[p] += 1
+    total := g.px.len()
+    mut sum := 0
+    for i in 0..256
+        sum += i * hist[i]
+    mut best := 128
+    mut best_var := -1.0
+    mut wb := 0
+    mut sb := 0
+    for t in 0..256
+        wb += hist[t]
+        if wb == 0
+            continue
+        wf := total - wb
+        if wf == 0
+            break
+        sb += t * hist[t]
+        mb := sb.to_float() / wb.to_float()
+        mf := (sum - sb).to_float() / wf.to_float()
+        v := wb.to_float() * wf.to_float() * (mb - mf) * (mb - mf)
+        if v > best_var
+            best_var = v
+            best = t
+    best
+
+## Black runs row by row: pixels at or under `t` are ink.
+pub fn runs_of(g image.Gray, t int) List[List[Run]]
+    mut rows := List[List[Run]]()
+    w := g.width
+    for y in 0..g.height
+        mut row := List[Run]()
+        base := y * w
+        mut x := 0
+        while x < w
+            if g.px[base + x] <= t
+                start := x
+                while x < w and g.px[base + x] <= t
+                    x += 1
+                row.push(Run(y: y, x0: start, x1: x))
+            else
+                x += 1
+        rows.push(row)
+    rows
+
+fn find(mut parent List[int], i int) int
+    mut r := i
+    while parent[r] != r
+        r = parent[r]
+    mut j := i
+    while parent[j] != r
+        n := parent[j]
+        parent[j] = r
+        j = n
+    r
+
+## Eight-connected components of the runs: runs on neighbouring rows join
+## when they touch or meet at a corner.
+pub fn blobs_of(rows List[List[Run]]) List[Blob]
+    mut all := List[Run]()
+    mut starts := List[int]()
+    for row in rows
+        starts.push(all.len())
+        all.extend(row)
+    starts.push(all.len())
+    mut parent := [i for i in 0..all.len()]
+    for y in 1..rows.len()
+        mut i := starts[y - 1]
+        mut j := starts[y]
+        while i < starts[y] and j < starts[y + 1]
+            a := all[i]
+            b := all[j]
+            if a.x0 <= b.x1 and b.x0 <= a.x1
+                ra := find(mut parent, i)
+                rb := find(mut parent, j)
+                if ra != rb
+                    parent[ra.max(rb)] = ra.min(rb)
+            if a.x1 < b.x1
+                i += 1
+            else
+                j += 1
+    mut index := Map[int, int]()
+    mut out := List[Blob]()
+    for k in 0..all.len()
+        r := find(mut parent, k)
+        run := all[k]
+        if n := index.get(r)
+            mut b := out[n]
+            b.x0 = b.x0.min(run.x0)
+            b.x1 = b.x1.max(run.x1)
+            b.y1 = b.y1.max(run.y + 1)
+            b.runs.push(run)
+            out[n] = b
+        else
+            index[r] = out.len()
+            out.push(Blob(x0: run.x0, y0: run.y, x1: run.x1, y1: run.y + 1, runs: [run]))
+    out
+
+fn median(xs List[int]) int
+    if xs.len() == 0
+        return 0
+    s := xs.sorted()
+    s[s.len() / 2]
+
+fn merged(a Blob, b Blob) Blob
+    mut runs := a.runs
+    runs.extend(b.runs)
+    Blob(x0: a.x0.min(b.x0), y0: a.y0.min(b.y0), x1: a.x1.max(b.x1), y1: a.y1.max(b.y1), runs: runs)
+
+## Groups blobs into lines and words. Blobs much taller than the text
+## (rules, pictures) and specks are left out.
+pub fn lines_of(blobs List[Blob]) List[GlyphLine]
+    hs := [b.h() for b in blobs if b.h() >= 4]
+    m := median(hs).max(4)
+    mut big := [b for b in blobs if b.h() >= m * 3 / 5 and b.h() <= m * 5 and b.w() <= m * 8]
+    big = big.sorted(by: |b| b.x0)
+    mut lines := List[List[Blob]]()
+    mut tops := List[int]()
+    mut bots := List[int]()
+    mut ends := List[int]()
+    for b in big
+        mut best := -1
+        mut best_ov := 0
+        for i in 0..lines.len()
+            if b.x0 - ends[i] > m * 4
+                continue
+            ov := b.y1.min(bots[i]) - b.y0.max(tops[i])
+            need := (b.h().min(bots[i] - tops[i])) / 2
+            if ov > need and ov > best_ov
+                best = i
+                best_ov = ov
+        if best < 0
+            lines.push([b])
+            tops.push(b.y0)
+            bots.push(b.y1)
+            ends.push(b.x1)
+        else
+            lines[best].push(b)
+            # The band follows the line's body, not one tall letter.
+            n := lines[best].len()
+            tops[best] = (tops[best] * (n - 1) + b.y0) / n
+            bots[best] = (bots[best] * (n - 1) + b.y1) / n
+            ends[best] = ends[best].max(b.x1)
+    # Small marks (dots, commas, accents) join the line whose band, widened
+    # above and below, holds them.
+    for b in blobs
+        if b.h() >= m * 3 / 5 or b.h() * b.w() < 2
+            continue
+        # The nearest band wins: a comma sits in its own line's band, not
+        # in the widened band of the line below.
+        mut best := -1
+        mut best_gap := 0
+        for i in 0..lines.len()
+            band := bots[i] - tops[i]
+            first := lines[i][0].x0
+            if b.y0 >= tops[i] - band * 2 / 3
+                and b.y1 <= bots[i] + band / 2
+                and b.x0 >= first - m
+                and b.x1 <= ends[i] + m
+                gap := (tops[i] - b.y1).max(0) + (b.y0 - bots[i]).max(0)
+                if best < 0 or gap < best_gap
+                    best = i
+                    best_gap = gap
+        if best >= 0
+            lines[best].push(b)
+    # A short line of marks much smaller than a line just under or over it
+    # (a big title's accents and dots) belongs to that line.
+    for i in 0..lines.len()
+        if lines[i].len() == 0 or lines[i].len() > 3
+            continue
+        h := [b.h() for b in lines[i]].max() else 0
+        y0 := [b.y0 for b in lines[i]].min() else 0
+        y1 := [b.y1 for b in lines[i]].max() else 0
+        for k in 0..lines.len()
+            band := bots[k] - tops[k]
+            if k == i or lines[k].len() <= 3 or h * 5 > band * 3
+                continue
+            if y0 >= tops[k] - band
+                and y1 <= bots[k] + band / 2
+                and lines[i][0].x0 >= lines[k][0].x0 - m
+                and lines[i][0].x0 <= ends[k] + m
+                lines[k].extend(lines[i])
+                lines[i] = []
+                break
+    mut out := List[GlyphLine]()
+    for l in lines
+        if l.len() > 0
+            out.push(glyph_line(l, m))
+    out.sorted(by: |l| l.y0 / m * 1000000 + l.x0)
+
+fn glyph_line(blobs List[Blob], m int) GlyphLine
+    sorted := blobs.sorted(by: |b| b.x0)
+    # Glyph bodies first; pieces of one glyph overlap across x.
+    mut gs := List[Blob]()
+    mut marks := List[Blob]()
+    for b in sorted
+        if b.h() * 5 < m * 3
+            marks.push(b)
+            continue
+        if gs.len() > 0
+            last := gs[gs.len() - 1]
+            ov := last.x1.min(b.x1) - last.x0.max(b.x0)
+            if ov * 2 > b.w().min(last.w())
+                gs[gs.len() - 1] = merged(last, b)
+                continue
+        gs.push(b)
+    base0 := median([g.y1 for g in gs])
+    # Small marks: stacked ones (colon, the bars of =) and pairs side by
+    # side high on the line (quotes, a diaeresis) are one mark.
+    mut ms := List[Blob]()
+    for b in marks
+        if ms.len() > 0
+            last := ms[ms.len() - 1]
+            ov := last.x1.min(b.x1) - last.x0.max(b.x0)
+            high := b.y1 < base0 - m / 2 and last.y1 < base0 - m / 2
+            pair := high
+                and (b.y0 - last.y0).abs() * 2 <= b.h().max(last.h())
+                and b.x0 - last.x1 < b.w().max(last.w()) * 6 / 5
+            if ov > 0 or pair
+                ms[ms.len() - 1] = merged(last, b)
+                continue
+        ms.push(b)
+    # A mark over or under a glyph body it overlaps (the dot of an i, an
+    # accent, a cedilla) is part of it; any other mark is its own glyph.
+    for b in ms
+        mut best := -1
+        mut best_ov := 0
+        for i in 0..gs.len()
+            g := gs[i]
+            ov := g.x1.min(b.x1) - g.x0.max(b.x0)
+            stacked := b.y1 <= g.y0 + 2 or b.y0 >= g.y1 - 2 or ov * 2 > b.w()
+            if ov > best_ov and stacked
+                best = i
+                best_ov = ov
+        if best >= 0
+            gs[best] = merged(gs[best], b)
+        else
+            gs.push(b)
+    gs = gs.sorted(by: |b| b.x0)
+    tall := [g for g in gs if g.h() >= m / 2]
+    base := median([g.y1 for g in tall])
+    above := [base - g.y0 for g in tall if (g.y1 - base).abs() <= m / 6].sorted()
+    size := if above.len() > 0 then above[above.len() * 9 / 10] else m
+    mut gaps := List[int]()
+    for i in 1..gs.len()
+        gaps.push(gs[i].x0 - gs[i - 1].x1)
+    cut := word_gap(gaps, size)
+    mut words := [0]
+    for i in 1..gs.len()
+        if gaps[i - 1] > cut
+            words.push(i)
+    GlyphLine(
+        glyphs: gs,
+        words: words,
+        base: base,
+        size: size.max(1),
+        x0: [g.x0 for g in gs].min() else 0,
+        y0: [g.y0 for g in gs].min() else 0,
+        x1: [g.x1 for g in gs].max() else 0,
+        y1: [g.y1 for g in gs].max() else 0,
+    )
+
+## The gap above which glyphs are in different words: a fraction of the
+## text size, raised to sit between the line's letter and word gaps.
+fn word_gap(gaps List[int], size int) int
+    mut cut := size * 3 / 10
+    if gaps.len() < 4
+        return cut
+    s := gaps.sorted()
+    letter := s[s.len() / 4]
+    cut = cut.max(letter + size / 8)
+    cut
+
+fn boxes(w int, h int, rects List[List[int]]) image.Gray
+    mut g := image.Gray.new(w, h, 255)
+    for r in rects
+        for y in r[1]..r[3]
+            for x in r[0]..r[2]
+                g.px[y * w + x] = 0
+    g
+
+@test fn finds_lines_and_words()
+    # Two lines: "ab c" as boxes 10 high, then one glyph with a dot above.
+    g := boxes(120, 60, [
+        [5, 5, 11, 15],
+        [13, 5, 19, 15],
+        [30, 5, 36, 15],
+        [5, 30, 8, 40],
+        [5, 25, 8, 27],
+    ])
+    ls := lines_of(blobs_of(runs_of(g, threshold(g))))
+    assert_eq(ls.len(), 2)
+    assert_eq(ls[0].glyphs.len(), 3)
+    assert_eq(ls[0].words, [0, 2])
+    assert_eq(ls[1].glyphs.len(), 1)
+    assert_eq(ls[1].glyphs[0].y0, 25)

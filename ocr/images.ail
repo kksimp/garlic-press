@@ -101,3 +101,64 @@ fn decode(
     s := image.from_samples(e.data, w, h, bpc, sp.comps) else err
         return bad(err)
     if sp.ink then s.inverted() else s
+
+## A page image as ink: black runs per row (see `Run`).
+pub struct Ink
+    pub width int
+    pub height int
+    pub rows List[List[Run]]
+
+## The ink of an image: fax data straight from its changing elements,
+## anything else through a grey bitmap and its Otsu threshold.
+pub fn ink_of(doc reader.Doc, obj reader.Obj) Ink ! reader.PdfError
+    d := match obj
+        Stream(d, start, len) => d
+        Null | Bool | Int | Real | Str | Name | Arr | Dict | Ref | Op =>
+            return reader.PdfError.Bad(why: "an image that is not a stream")
+    e := doc.image_stream(obj)?
+    if e.codec == "CCITTFaxDecode" or e.codec == "CCF"
+        p := e.parms
+        h := doc.key(d, "Height").as_int() else 0
+        cols := doc.key(p, "Columns").as_int() else 1728
+        changes := image.ccitt_rows(
+            e.data,
+            cols,
+            doc.key(p, "Rows").as_int() else h,
+            doc.key(p, "K").as_int() else 0,
+            doc.key(p, "EncodedByteAlign").as_bool() else false,
+        ) else err
+            return bad(err)
+        dec := doc.key(d, "Decode").as_arr() else []
+        flip := dec.len() >= 2
+            and (doc.resolve(dec[0]).as_num() else 0.0) > (doc.resolve(dec[1]).as_num() else 0.0)
+        black1 := doc.key(p, "BlackIs1").as_bool() else false
+        # The codec's black is ink unless BlackIs1 or a /Decode flip (not
+        # both) turns it to paper.
+        odd := if black1 != flip then 0 else 1
+        mut rows := List[List[Run]]()
+        for y in 0..changes.len()
+            c := changes[y]
+            mut row := List[Run]()
+            mut x := 0
+            for i in 0..c.len() + 1
+                e2 := if i < c.len() then c[i] else cols
+                if i % 2 == odd and e2 > x
+                    row.push(Run(y: y, x0: x, x1: e2))
+                x = e2
+            rows.push(row)
+        return Ink(width: cols, height: changes.len(), rows: rows)
+    g := gray_of(doc, obj)?
+    Ink(width: g.width, height: g.height, rows: ink_runs(g))
+
+## Black runs of a grey image at its Otsu threshold; when most of the
+## image is "ink", it is light text on a dark ground (or no text at all),
+## so the light side is taken as ink instead.
+pub fn ink_runs(g image.Gray) List[List[Run]]
+    t := threshold(g)
+    mut dark := 0
+    for p in g.px
+        if p <= t
+            dark += 1
+    if dark * 2 <= g.px.len()
+        return runs_of(g, t)
+    runs_of(g.inverted(), 254 - t)

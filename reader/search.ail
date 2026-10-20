@@ -132,6 +132,8 @@ fn test_page(lines List[Line]) Page
         images: 0,
         unreadable: 0,
         image_only: false,
+        ocr: false,
+        confidence: 0,
     )
     Page(model: m, lines: lines, placed: [])
 

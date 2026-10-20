@@ -1,0 +1,219 @@
+## OCR of a scanned page, on demand (ADR 0511, ADR 0512): only a page that
+## is shown or searched, has images and no text is recognized, once. Its
+## glyphs go through the same line builder as text-layer glyphs, so search,
+## JSON and the viewer treat OCR lines like any others.
+
+use image
+use reader
+
+## The reference shapes, parsed the first time a page needs them.
+struct ShapeCache
+    shapes List[Shapes]
+
+pub struct Ocr
+    cache ref ShapeCache
+    pub on bool
+
+pub fn Ocr.new(on bool) Ocr
+    Ocr(cache: ref ShapeCache(shapes: []), on: on)
+
+pub fn Ocr.shapes(self) Shapes
+    if cache.shapes.len() == 0
+        cache.shapes.push(Shapes.load(SHAPES))
+    cache.shapes[0]
+
+## A recognized word in image pixels.
+pub struct Word
+    pub text str
+    pub x0 int
+    pub y0 int
+    pub x1 int
+    pub y1 int
+    pub sure float
+    ## Each character's left and right edge.
+    pub starts List[int]
+    pub ends List[int]
+
+## A recognized line: its words, baseline and text size in pixels.
+pub struct TextRow
+    pub words List[Word]
+    pub base int
+    pub size int
+
+## Recognizes the text of a grey image.
+pub fn read_gray(g image.Gray, shapes Shapes) List[TextRow]
+    read_runs(ink_runs(g), shapes)
+
+## Recognizes the text in rows of black runs.
+pub fn read_runs(runs List[List[Run]], shapes Shapes) List[TextRow]
+    if shapes.labels.len() == 0
+        return []
+    lines := lines_of(blobs_of(runs))
+    mut glyphs := List[Blob]()
+    mut owners := List[GlyphLine]()
+    for l in lines
+        for b in l.glyphs
+            glyphs.push(b)
+            owners.push(l)
+    guesses := shapes.classify(features_of(glyphs, owners))
+    mut out := List[TextRow]()
+    mut k := 0
+    for l in lines
+        mut words := List[Word]()
+        for wi in 0..l.words.len()
+            a := l.words[wi]
+            z := if wi + 1 < l.words.len() then l.words[wi + 1] else l.glyphs.len()
+            mut text := ""
+            mut sure := 1.0
+            mut starts := List[int]()
+            mut ends := List[int]()
+            labels := in_context([guesses[k + i].label for i in a..z])
+            for i in a..z
+                label := labels[i - a]
+                text = "{text}{label}"
+                sure = sure.min(guesses[k + i].sure)
+                b := l.glyphs[i]
+                n := label.chars().len()
+                for c in 0..n
+                    starts.push(b.x0 + b.w() * c / n)
+                    ends.push(b.x0 + b.w() * (c + 1) / n)
+            gs := l.glyphs[a..z]
+            words.push(Word(
+                text: text,
+                x0: [b.x0 for b in gs].min() else 0,
+                y0: [b.y0 for b in gs].min() else 0,
+                x1: [b.x1 for b in gs].max() else 0,
+                y1: [b.y1 for b in gs].max() else 0,
+                sure: sure,
+                starts: starts,
+                ends: ends,
+            ))
+        k += l.glyphs.len()
+        out.push(TextRow(words: words, base: l.base, size: l.size))
+    out
+
+## Glyphs that look alike (l, I, 1, |, !; o, O, 0; S, 5; Z, 2) settled
+## by the word around them: digits among digits, letters among letters.
+pub fn in_context(labels List[str]) List[str]
+    bars := {"l", "I", "1", "|", "!"}
+    rounds := {"o", "O", "0"}
+    mut lower := 0
+    mut upper := 0
+    mut digits := 0
+    for l in labels
+        if bars.contains(l) or rounds.contains(l)
+            continue
+        for c in l.chars()
+            if c >= 'a' and c <= 'z'
+                lower += 1
+            elif c >= 'A' and c <= 'Z'
+                upper += 1
+            elif c >= '0' and c <= '9'
+                digits += 1
+    number := digits > 0 and lower == 0 and upper == 0
+    mut out := List[str]()
+    for i in 0..labels.len()
+        l := labels[i]
+        last := i == labels.len() - 1
+        if bars.contains(l)
+            if number
+                out.push("1")
+            elif l == "!" and last and i > 0
+                out.push("!")
+            elif lower > 0
+                out.push(if i == 0 and l == "I" then "I" else "l")
+            elif upper > 0 or labels.len() == 1
+                out.push("I")
+            else
+                out.push(l)
+        elif rounds.contains(l)
+            if number
+                out.push("0")
+            elif l == "0"
+                out.push(if lower > 0 then "o" else "O")
+            else
+                out.push(l)
+        elif number and (l == "S" or l == "s")
+            out.push("5")
+        elif number and (l == "Z" or l == "z")
+            out.push("2")
+        else
+            out.push(l)
+    out
+
+## The page with OCR lines when it is a scan and OCR is on; the result is
+## kept in the page cache, so each page is recognized once.
+pub fn Ocr.page(self, ps reader.Pages, i int) reader.Page
+    p := ps.get(i)
+    if not on or not p.model.image_only or p.model.ocr
+        return p
+    q := recognize(ps.doc, p, shapes())
+    ps.put(i, q)
+    q
+
+## Runs OCR over every image on the page and maps the words to page
+## space through the matrix each image was painted with.
+pub fn recognize(doc reader.Doc, p reader.Page, shapes Shapes) reader.Page
+    mut glyphs := List[reader.Glyph]()
+    mut sure := 0.0
+    mut words := 0
+    for pl in p.placed
+        g := ink_of(doc, pl.obj) else continue
+        if g.width < 64 or g.height < 32
+            continue
+        m := pl.ctm
+        fw := g.width.to_float()
+        fh := g.height.to_float()
+        # Pixel (x, y) is (x / w, 1 - y / h) in the image's unit square.
+        for row in read_runs(g.rows, shapes)
+            for w in row.words
+                v := 1.0 - row.base.to_float() / fh
+                # Tall letters stand about 0.7 em above the baseline.
+                size := (m[3] * row.size.to_float() / fh).abs() / 0.7
+                cs := w.text.chars()
+                for c in 0..cs.len()
+                    u0 := w.starts[c].to_float() / fw
+                    u1 := w.ends[c].to_float() / fw
+                    x0 := m[0] * u0 + m[2] * v + m[4]
+                    x1 := m[0] * u1 + m[2] * v + m[4]
+                    y := m[1] * u0 + m[3] * v + m[5]
+                    # Each glyph reaches the next one, so only word gaps
+                    # read as spaces.
+                    nx := if c
+                        + 1 < cs.len() then m[0] * w.starts[c + 1].to_float() / fw
+                        + m[2] * v
+                        + m[4] else x1
+                    glyphs.push(reader.Glyph(
+                        text: "{cs[c]}",
+                        x: x0,
+                        y: y,
+                        w: nx - x0,
+                        size: size,
+                        known: true,
+                    ))
+                ux := w.x1.to_float() / fw
+                glyphs.push(reader.Glyph(
+                    text: " ",
+                    x: m[0] * ux + m[2] * v + m[4],
+                    y: m[1] * ux + m[3] * v + m[5],
+                    w: size * 0.25,
+                    size: size,
+                    known: true,
+                ))
+                sure += w.sure
+                words += 1
+    lines := reader.lines_of(glyphs)
+    mut model := p.model
+    model.lines = [
+        reader.TextLine(
+            text: l.text,
+            x: reader.r2(l.x),
+            y: reader.r2(l.y),
+            size: reader.r2(l.size),
+            right: reader.r2(l.right()),
+        )
+        for l in lines
+    ]
+    model.ocr = true
+    model.confidence = if words > 0 then reader.r2(sure / words.to_float()) else 0.0
+    reader.Page(model: model, lines: lines, placed: p.placed)

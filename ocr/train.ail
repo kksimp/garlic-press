@@ -1,0 +1,149 @@
+## Builds the reference shapes (ADR 0512): each character drawn in each
+## font at a few sizes and ink weights, cut out by the same layout code
+## that reads scans, and averaged per font.
+
+use image
+
+## The characters OCR knows: printable ASCII and common Latin-1 and
+## typographic ones. `"` is two marks side by side and reads as `''`.
+pub CHARS := "!#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz\{|}~©®°±·×÷€£¥§¶•–—‘’“”àáâäçèéêëîïñóôöùúûüÀÁÂÄÇÈÉÊËÎÏÑÓÔÖÙÚÛÜßæøœÆØŒ"
+
+## Letter pairs that touch in many fonts and so scan as one glyph.
+PAIRS := [
+    "fi",
+    "fl",
+    "ff",
+    "ffi",
+    "ffl",
+    "ft",
+    "fj",
+    "tt",
+    "ti",
+    "tf",
+    "fr",
+    "fo",
+    "fa",
+    "fe",
+    "rt",
+    "ry",
+    "rv",
+    "rf",
+    "Th",
+    "LT",
+    "TT",
+    "gj",
+    "rn",
+    "rm",
+]
+
+SIZES := [26.0, 36.0, 50.0]
+
+## Ink thresholds: thin, normal and heavy strokes, as on a light or a
+## dark scan.
+LEVELS := [70, 127, 190]
+
+## Samples of one font: each character between `H` and `x`, so the line
+## has a baseline and a text size to measure it against.
+pub fn samples(f image.Font, mut labels List[str], mut rows List[List[float]]) int
+    mut skipped := 0
+    mut glyphs := List[Blob]()
+    mut owners := List[GlyphLine]()
+    mut texts := ["{c}" for c in CHARS.chars()]
+    texts.extend(PAIRS)
+    for c in texts
+        pair := c.chars().len() > 1
+        for px in SIZES
+            mut cv := image.Canvas.new((px * 8.0).to_int(), (px * 2.2).to_int())
+            # Space around the sample, none inside a pair.
+            gap := px * 0.12
+            mut pen := cv.text(f, "H", px, px * 1.5, px, gap)
+            pen = cv.text(f, c, pen, px * 1.5, px, 0.0) + gap
+            cv.text(f, "x", pen, px * 1.5, px, 0.0)
+            g := cv.gray()
+            for t in LEVELS
+                lines := lines_of(blobs_of(runs_of(g, t)))
+                if lines.len() != 1 or lines[0].glyphs.len() != 3
+                    # A pair that doesn't touch is read as its letters.
+                    if not pair
+                        skipped += 1
+                    continue
+                # The line's measures come from the H, not from a
+                # percentile that a tall sample (an accented capital) skews.
+                mut l := lines[0]
+                l.base = l.glyphs[0].y1
+                l.size = l.glyphs[0].h()
+                labels.push("{c}")
+                glyphs.push(l.glyphs[1])
+                owners.push(l)
+    rows.extend(features_of(glyphs, owners))
+    skipped
+
+## The mean shape per label of one font's samples.
+pub fn means(labels List[str], rows List[List[float]]) Shapes
+    mut sums := Map[str, List[float]]()
+    mut counts := Map[str, int]()
+    mut order := List[str]()
+    for i in 0..labels.len()
+        l := labels[i]
+        if not sums.contains(l)
+            sums[l] = [0.0 for _ in 0..dims()]
+            counts[l] = 0
+            order.push(l)
+        mut s := sums[l]
+        for k in 0..dims()
+            s[k] += rows[i][k]
+        sums[l] = s
+        counts[l] = counts[l] + 1
+    mut out := Shapes(labels: [], rows: [])
+    for l in order
+        n := counts[l].to_float()
+        out.labels.push(l)
+        out.rows.extend([v / n for v in sums[l]])
+    out
+
+## At most `k` shapes per label: the two nearest shapes of a label merge
+## (weighted by how many each stands for) until `k` are left, so fonts
+## that draw a letter alike share one shape.
+pub fn Shapes.reduce(self, k int) Shapes
+    n := dims()
+    mut groups := Map[str, List[List[float]]]()
+    mut weights := Map[str, List[float]]()
+    mut order := List[str]()
+    for i in 0..labels.len()
+        l := labels[i]
+        if not groups.contains(l)
+            groups[l] = []
+            weights[l] = []
+            order.push(l)
+        groups.push(l, rows[i * n..(i + 1) * n])
+        weights.push(l, 1.0)
+    mut out := Shapes(labels: [], rows: [])
+    for l in order
+        mut g := groups[l]
+        mut w := weights[l]
+        while g.len() > k
+            mut bi := 0
+            mut bj := 1
+            mut bd := 1.0e18
+            for i in 0..g.len()
+                for j in i + 1..g.len()
+                    mut d := 0.0
+                    for c in 0..n
+                        e := g[i][c] - g[j][c]
+                        d += e * e
+                    if d < bd
+                        bd = d
+                        bi = i
+                        bj = j
+            wi := w[bi]
+            wj := w[bj]
+            g[bi] = [(g[bi][c] * wi + g[bj][c] * wj) / (wi + wj) for c in 0..n]
+            w[bi] = wi + wj
+            g[bj] = g[g.len() - 1]
+            w[bj] = w[w.len() - 1]
+            g.pop()
+            w.pop()
+        for r in g
+            out.labels.push(l)
+            out.rows.extend(r)
+    out

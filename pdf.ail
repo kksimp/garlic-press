@@ -38,7 +38,7 @@ struct Args
 ## Words and `--flag [value]` options; `--case`, `--json` and `--print`
 ## take no value.
 fn parse_args(raw List[str]) Args
-    bare := {"--case", "--json", "--print", "--first"}
+    bare := {"--case", "--json", "--print", "--first", "--no-ocr"}
     mut a := Args(words: [], flags: {})
     mut i := 0
     while i < raw.len()
@@ -62,13 +62,20 @@ fn open_doc(path str) reader.Doc ! reader.PdfError
 
 ## The pages `--page` picks: all of them, or one.
 ## Only the chosen page is read (ADR 0511).
+## Scanned pages among them are read by OCR unless `--no-ocr` is given.
 fn chosen(doc reader.Doc, a Args) List[reader.Page] ! reader.PdfError
+    pick(doc, a, ocr_of(a))
+
+fn pick(doc reader.Doc, a Args, o ocr.Ocr) List[reader.Page] ! reader.PdfError
     ps := doc.lazy_pages()?
-    p := a.flags.get("--page") else return [ps.get(i) for i in 0..ps.count()]
+    p := a.flags.get("--page") else return [o.page(ps, i) for i in 0..ps.count()]
     n := p.to_int() else return reader.PdfError.Io(why: "--page needs a number, got {p}")
     if n < 1 or n > ps.count()
         return reader.PdfError.Io(why: "no page {n}; the document has {ps.count()}")
-    [ps.get(n - 1)]
+    [o.page(ps, n - 1)]
+
+fn ocr_of(a Args) ocr.Ocr
+    ocr.Ocr.new(not a.flags.contains("--no-ocr"))
 
 fn text_cmd(a Args) ! reader.PdfError
     path := a.word(1) else return reader.PdfError.Io(why: "text needs a FILE")
@@ -93,10 +100,11 @@ fn grep_cmd(a Args) bool ! reader.PdfError
         # Page by page: each hit prints as soon as its page is read, and
         # `--first` stops at the first page with one (ADR 0511).
         ps := doc.lazy_pages()?
+        o := ocr_of(a)
         for i in 0..ps.count()
             if found and a.flags.contains("--first")
                 break
-            hits := reader.search_page(ps.get(i), pattern, case)
+            hits := reader.search_page(o.page(ps, i), pattern, case)
             mut last := -1
             for h in hits
                 found = true
@@ -149,7 +157,7 @@ fn info_cmd(a Args) ! reader.PdfError
     print("text lines: {lines}")
     print("glyphs without text: {unreadable}")
     if scans.len() > 0
-        print("image-only pages (scans; these need OCR): {scans.join(", ")}")
+        print("image-only pages (scans, read by OCR when shown or searched): {scans.join(", ")}")
     if doc.repaired
         print("note: the cross-reference table was damaged and rebuilt by scanning")
 
@@ -185,7 +193,7 @@ fn images_cmd(a Args) ! reader.PdfError
     path := a.word(1) else return reader.PdfError.Io(why: "images needs a FILE")
     doc := open_doc(path)?
     mut best := image.Gray.new(0, 0, 0)
-    for p in chosen(doc, a)?
+    for p in pick(doc, a, ocr.Ocr.new(false))?
         for pl in p.placed
             t0 := time.now_ms()
             g := ocr.gray_of(doc, pl.obj) else err
@@ -197,6 +205,59 @@ fn images_cmd(a Args) ! reader.PdfError
     if out := a.flags.get("--out")
         fs.write_bytes(out, bytes.from_list([v.to_u8() for v in best.pgm()])) else err
             return reader.PdfError.Io(why: "can't write {out}: {err}")
+
+## `layout`: the glyph lines OCR finds on scanned pages, as boxes.
+fn layout_cmd(a Args) ! reader.PdfError
+    path := a.word(1) else return reader.PdfError.Io(why: "layout needs a FILE")
+    doc := open_doc(path)?
+    for p in pick(doc, a, ocr.Ocr.new(false))?
+        for pl in p.placed
+            t0 := time.now_ms()
+            ink := ocr.ink_of(doc, pl.obj)?
+            t1 := time.now_ms()
+            rows := ink.rows
+            t2 := time.now_ms()
+            blobs := ocr.blobs_of(rows)
+            t3 := time.now_ms()
+            lines := ocr.lines_of(blobs)
+            t4 := time.now_ms()
+            io.eprint("ink {t1 - t0} ms, blobs {t3 - t2} ms ({blobs.len()}), lines {t4 - t3} ms ({lines.len()})")
+            for l in lines
+                ws := [w.to_str() for w in l.words].join(",")
+                gs := ["{b.x0},{b.y0},{b.x1},{b.y1}" for b in l.glyphs].join(" ")
+                print("{l.x0} {l.y0} {l.x1} {l.y1} base={l.base} size={l.size} words={ws} | {gs}")
+
+## `train FONT.ttf... --out FILE`: draws each font's characters and saves
+## the reference shapes OCR compares glyphs with (ADR 0512).
+fn train_cmd(a Args) ! reader.PdfError
+    out := a.flags.get("--out") else return reader.PdfError.Io(why: "train needs --out FILE")
+    mut all := ocr.Shapes(labels: [], rows: [])
+    for path in a.words[1..]
+        if path.ends_with(".shapes") or path.ends_with(".ail")
+            # Shapes saved before, to reduce them again without drawing.
+            t := fs.read_text(path) else err
+                return reader.PdfError.Io(why: "can't read {path}: {err}")
+            old := ocr.Shapes.load(t)
+            all.labels.extend(old.labels)
+            all.rows.extend(old.rows)
+            continue
+        raw := fs.read_bytes(path) else err
+            return reader.PdfError.Io(why: "can't read {path}: {err}")
+        f := image.Font.parse([x.to_int() for x in raw]) else err
+            return reader.PdfError.Bad(why: "{path}: {err}")
+        mut labels := List[str]()
+        mut rows := List[List[float]]()
+        skipped := ocr.samples(f, mut labels, mut rows)
+        m := ocr.means(labels, rows)
+        io.eprint("{path}: {m.labels.len()} shapes from {labels.len()} samples, {skipped} lines skipped")
+        all.labels.extend(m.labels)
+        all.rows.extend(m.rows)
+    keep := ((a.flags.get("--per-char") else "8").to_int() else 8)
+    rows := ["    {l}" for l in all.reduce(keep).save().split("\n")].join("\n")
+    names := [p.split("/").last() else p for p in a.words[1..]].join(", ")
+    head := "## Reference glyph shapes for OCR, made by `pdf train` (ADR 0512) from\n## {names}.\n## Generated: run `pdf train` again rather than editing.\n\n"
+    fs.write_text(out, "{head}SHAPES := \"\"\"\n{rows}\n    \"\"\"\n") else err
+        return reader.PdfError.Io(why: "can't write {out}: {err}")
 
 fn main()
     a := parse_args(env.args())
@@ -226,6 +287,14 @@ fn main()
             io.exit(2)
     elif cmd == "images"
         images_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "layout"
+        layout_cmd(a) else err
+            io.eprint("pdf: {err}")
+            io.exit(2)
+    elif cmd == "train"
+        train_cmd(a) else err
             io.eprint("pdf: {err}")
             io.exit(2)
     elif cmd == "outline"

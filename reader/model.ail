@@ -38,6 +38,10 @@ pub struct PageModel
     pub unreadable int
     ## True when the page paints images and no text: a scan, which needs OCR.
     pub image_only bool
+    ## True when the lines were read from the page's images by OCR.
+    pub ocr bool
+    ## OCR's mean confidence per word, 0 to 1 (0 without OCR).
+    pub confidence float
 
 impl ToJson for PageModel
 
@@ -271,7 +275,7 @@ struct PageCache
 ## (ADR 0511): opening costs the page tree only, and a viewer or a search
 ## that stops early never reads the rest.
 pub struct Pages
-    doc Doc
+    pub doc Doc
     dicts List[Map[str, Obj]]
     nums Map[int, int]
     cache ref PageCache
@@ -290,6 +294,10 @@ pub fn Pages.get(self, i int) Page
     p := doc.read_page(dicts[i], i + 1, nums)
     cache.pages[i] = p
     p
+
+## Replaces page `i` in the cache, as OCR does once it has read it.
+pub fn Pages.put(self, i int, p Page)
+    cache.pages[i] = p
 
 ## Pages already read, for tests and tools that build pages themselves.
 pub fn pages_of(list List[Page]) Pages
@@ -349,6 +357,8 @@ pub fn Doc.read_page(self, p Map[str, Obj], number int, nums Map[int, int]) Page
         images: pt.images,
         unreadable: unreadable,
         image_only: pt.images > 0 and pt.glyphs.len() == 0,
+        ocr: false,
+        confidence: 0,
     )
     Page(model: model, lines: lines, placed: pt.placed)
 
@@ -378,6 +388,8 @@ pub fn text_page(number int, texts List[str]) Page
         images: 0,
         unreadable: 0,
         image_only: false,
+        ocr: false,
+        confidence: 0,
     )
     Page(model: m, lines: lines, placed: [])
 
