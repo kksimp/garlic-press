@@ -209,7 +209,7 @@ pub fn Shapes.save(self) str
         mut hx := List[str]()
         for k in 0..n
             v := rows[i * n + k]
-            hx.push(hex2(if k < SHAPE then(v * 255.0).round().to_int() else (v / GEOMETRY * 64.0).round().to_int()))
+            hx.push(hex2(if k < SHAPE then (v * 255.0).round().to_int() else (v / GEOMETRY * 64.0).round().to_int()))
         out.push("{code} {hx.join("")}")
     out.join("\n")
 
@@ -260,7 +260,7 @@ pub fn Shapes.classify(self, feats List[List[float]]) List[Guess]
                     second = d
         d1 := (bd + fn2).max(0.0).sqrt()
         d2 := (second + fn2).max(0.0).sqrt()
-        sure := if d2 > 0.0 then((d2 - d1) / d2).max(0.0).min(1.0) else 0.0
+        sure := if d2 > 0.0 then ((d2 - d1) / d2).max(0.0).min(1.0) else 0.0
         out.push(Guess(label: labels[best], sure: sure, dist: d1))
     out
 
