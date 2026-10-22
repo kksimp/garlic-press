@@ -1,0 +1,174 @@
+## PNG decoding (RFC 2083 / ISO 15948): every colour type and bit depth,
+## palettes with `tRNS` alpha, colour keys, and Adam7 interlacing. Chunk CRCs
+## are not checked, gamma and colour profiles are ignored.
+
+use std.compress
+
+PNG_SIG := [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+## Adam7: first column, first row, column step and row step of each pass.
+ADAM_X0 := [0, 4, 0, 2, 0, 1, 0]
+ADAM_Y0 := [0, 0, 4, 0, 2, 0, 1]
+ADAM_DX := [8, 8, 4, 4, 2, 2, 1]
+ADAM_DY := [8, 8, 8, 4, 4, 2, 2]
+
+fn be32(d List[int], at int) int
+    d[at].shl(24).bit_or(d[at + 1].shl(16)).bit_or(d[at + 2].shl(8)).bit_or(d[at + 3])
+
+## The value of sample `i` (of `depth` bits) in the row `row`.
+fn png_sample(row List[int], i int, depth int) int
+    if depth == 8
+        return row[i]
+    if depth == 16
+        return row[2 * i].shl(8).bit_or(row[2 * i + 1])
+    per := 8 / depth
+    row[i / per].shr(8 - depth - (i % per) * depth).bit_and(1.shl(depth) - 1)
+
+fn paeth(a int, b int, c int) int
+    p := a + b - c
+    pa := (p - a).abs()
+    pb := (p - b).abs()
+    pc := (p - c).abs()
+    if pa <= pb and pa <= pc
+        return a
+    if pb <= pc
+        return b
+    c
+
+## Undoes filter `ft` on `cur` (the row without its filter byte) given the
+## row above, `bpp` bytes per complete pixel.
+fn unfilter(mut cur List[int], prev List[int], ft int, bpp int) ! ImageError
+    n := cur.len()
+    if ft == 0
+        return
+    if ft > 4
+        return Bad(why: "PNG filter type {ft}")
+    for i in 0..n
+        a := if i >= bpp then cur[i - bpp] else 0
+        b := prev[i]
+        c := if i >= bpp then prev[i - bpp] else 0
+        pred := if ft
+            == 1 then a else if ft
+            == 2 then b else if ft
+            == 3 then (a + b) / 2 else paeth(a, b, c)
+        cur[i] = (cur[i] + pred).bit_and(255)
+
+## Decodes a PNG to colour.
+pub fn png(d List[int]) Rgba ! ImageError
+    if d.len() < 33 or d[0..8] != PNG_SIG
+        return Bad(why: "no PNG signature")
+    mut w := 0
+    mut h := 0
+    mut depth := 0
+    mut ctype := 0
+    mut interlace := 0
+    mut palette := List[int]()
+    mut trans := List[int]()
+    mut idat := List[int]()
+    mut p := 8
+    mut seen := false
+    while p + 12 <= d.len()
+        n := be32(d, p)
+        kind := d[p + 4..p + 8]
+        s := p + 8
+        if s + n > d.len()
+            break
+        if kind == [0x49, 0x48, 0x44, 0x52]
+            w = be32(d, s)
+            h = be32(d, s + 4)
+            depth = d[s + 8]
+            ctype = d[s + 9]
+            interlace = d[s + 12]
+            if d[s + 10] != 0 or d[s + 11] != 0
+                return Unsupported(what: "PNG compression or filter method")
+            seen = true
+        elif kind == [0x50, 0x4c, 0x54, 0x45]
+            palette = d[s..s + n]
+        elif kind == [0x74, 0x52, 0x4e, 0x53]
+            trans = d[s..s + n]
+        elif kind == [0x49, 0x44, 0x41, 0x54]
+            idat.extend(d[s..s + n])
+        elif kind == [0x49, 0x45, 0x4e, 0x44]
+            break
+        p = s + n + 4
+    if not seen or w <= 0 or h <= 0 or w > 65535 or h > 65535
+        return Bad(why: "PNG without a usable header ({w}x{h})")
+    if ctype != 0 and ctype != 2 and ctype != 3 and ctype != 4 and ctype != 6
+        return Bad(why: "PNG colour type {ctype}")
+    if depth != 1 and depth != 2 and depth != 4 and depth != 8 and depth != 16
+        return Bad(why: "PNG bit depth {depth}")
+    if (ctype == 2 or ctype == 4 or ctype == 6) and depth < 8
+        return Bad(why: "PNG colour type {ctype} at {depth} bits")
+    if ctype == 3 and (depth == 16 or palette.len() == 0)
+        return Bad(why: "PNG palette image without a palette")
+    raw := compress.unzlib(bytes.from_list([v.to_u8() for v in idat])) else b""
+    if raw.len() == 0
+        return Bad(why: "PNG image data does not inflate")
+    data := [v.to_int() for v in raw.to_list()]
+    spp := if ctype == 0
+        or ctype == 3 then 1 else if ctype == 4 then 2 else if ctype == 2 then 3 else 4
+    bpp := (spp * depth + 7) / 8
+    mut out := Rgba.new(w, h, 0)
+    passes := if interlace == 1 then 7 else 1
+    mut at := 0
+    for pass in 0..passes
+        x0 := if interlace == 1 then ADAM_X0[pass] else 0
+        y0 := if interlace == 1 then ADAM_Y0[pass] else 0
+        dx := if interlace == 1 then ADAM_DX[pass] else 1
+        dy := if interlace == 1 then ADAM_DY[pass] else 1
+        pw := (w - x0 + dx - 1) / dx
+        ph := (h - y0 + dy - 1) / dy
+        if pw <= 0 or ph <= 0
+            continue
+        rb := (pw * spp * depth + 7) / 8
+        mut prev := [0 for _ in 0..rb]
+        for yi in 0..ph
+            if at + 1 + rb > data.len()
+                return Bad(why: "PNG image data is short")
+            ft := data[at]
+            mut cur := data[at + 1..at + 1 + rb]
+            at += 1 + rb
+            unfilter(mut cur, prev, ft, bpp)?
+            y := y0 + yi * dy
+            for xi in 0..pw
+                px := png_pixel(cur, xi, ctype, depth, palette, trans)
+                out.px[y * w + x0 + xi * dx] = px
+            prev = cur
+    out
+
+## The `0xAARRGGBB` of pixel `i` of a row.
+fn png_pixel(row List[int], i int, ctype int, depth int, palette List[int], trans List[int]) int
+    top := 1.shl(depth) - 1
+    if ctype == 0
+        v := png_sample(row, i, depth)
+        g := v * 255 / top
+        a := if trans.len() >= 2 and trans[0].shl(8).bit_or(trans[1]) == v then 0 else 255
+        return argb(a, g, g, g)
+    if ctype == 3
+        v := png_sample(row, i, depth)
+        if v * 3 + 2 >= palette.len()
+            return 0xff000000
+        a := if v < trans.len() then trans[v] else 255
+        return argb(a, palette[v * 3], palette[v * 3 + 1], palette[v * 3 + 2])
+    if ctype == 4
+        g := png_sample(row, 2 * i, depth) * 255 / top
+        a := png_sample(row, 2 * i + 1, depth) * 255 / top
+        return argb(a, g, g, g)
+    r := png_sample(row, spp_at(ctype) * i, depth)
+    g := png_sample(row, spp_at(ctype) * i + 1, depth)
+    b := png_sample(row, spp_at(ctype) * i + 2, depth)
+    mut a := 255
+    if ctype == 6
+        a = png_sample(row, 4 * i + 3, depth) * 255 / top
+    elif trans.len() >= 6
+        if trans[0].shl(8).bit_or(trans[1]) == r
+            and trans[2].shl(8).bit_or(trans[3]) == g
+            and trans[4].shl(8).bit_or(trans[5]) == b
+            a = 0
+    argb(a, r * 255 / top, g * 255 / top, b * 255 / top)
+
+fn spp_at(ctype int) int
+    if ctype == 6 then 4 else 3
+
+fn argb(a int, r int, g int, b int) int
+    a.shl(24).bit_or(r.shl(16)).bit_or(g.shl(8)).bit_or(b)

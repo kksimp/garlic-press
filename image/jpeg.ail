@@ -1,0 +1,753 @@
+## JPEG decoding (ITU-T T.81), written from the standard (ADR 0512): baseline,
+## extended sequential and progressive Huffman, one to four components, any
+## sampling factors (nearest-neighbour upsampling), restart intervals, and
+## truncated data (what was decoded is kept). `jpeg` gives grey for the PDF
+## reader's OCR and `jpeg_rgb` gives colour for the browser.
+
+## Natural index of each zig-zag position (T.81 figure A.6).
+ZIGZAG := [
+    0,
+    1,
+    8,
+    16,
+    9,
+    2,
+    3,
+    10,
+    17,
+    24,
+    32,
+    25,
+    18,
+    11,
+    4,
+    5,
+    12,
+    19,
+    26,
+    33,
+    40,
+    48,
+    41,
+    34,
+    27,
+    20,
+    13,
+    6,
+    7,
+    14,
+    21,
+    28,
+    35,
+    42,
+    49,
+    56,
+    57,
+    50,
+    43,
+    36,
+    29,
+    22,
+    15,
+    23,
+    30,
+    37,
+    44,
+    51,
+    58,
+    59,
+    52,
+    45,
+    38,
+    31,
+    39,
+    46,
+    53,
+    60,
+    61,
+    54,
+    47,
+    55,
+    62,
+    63,
+]
+
+struct Comp
+    id int
+    h int
+    v int
+    tq int
+    td int
+    ta int
+
+## A Huffman table as a 16-bit lookahead: entry `length * 256 + value`.
+struct Huff
+    lut List[int]
+
+struct JBits
+    data List[int]
+    pos int
+    buf int
+    cnt int
+    marker bool
+
+fn huff_table(counts List[int], values List[int]) Huff
+    mut lut := [0 for _ in 0..65536]
+    mut code := 0
+    mut k := 0
+    for len in 1..17
+        for _ in 0..counts[len - 1]
+            if k < values.len()
+                first := code.shl(16 - len)
+                for i in 0..1.shl(16 - len)
+                    lut[first + i] = len * 256 + values[k]
+            k += 1
+            code += 1
+        code *= 2
+    Huff(lut: lut)
+
+fn JBits.fill(mut self)
+    while cnt <= 24
+        if marker or pos >= data.len()
+            buf = buf.shl(8).bit_and(0xffffffff)
+            cnt += 8
+            continue
+        c := data[pos]
+        if c == 0xff
+            n := if pos + 1 < data.len() then data[pos + 1] else 0
+            if n == 0
+                pos += 2
+            else
+                marker = true
+                continue
+        else
+            pos += 1
+        buf = buf.shl(8).bit_or(c).bit_and(0xffffffff)
+        cnt += 8
+
+fn JBits.bits(mut self, n int) int
+    if n == 0
+        return 0
+    if cnt < n
+        fill()
+    v := buf.shr(cnt - n).bit_and(1.shl(n) - 1)
+    cnt -= n
+    v
+
+fn JBits.decode(mut self, h Huff) int ! ImageError
+    if cnt < 16
+        fill()
+    e := h.lut[buf.shr(cnt - 16).bit_and(0xffff)]
+    if e == 0
+        return Bad(why: "bad Huffman code in JPEG data")
+    cnt -= e / 256
+    e % 256
+
+## Restarts after an RSTn marker: drop the bits left, step over the marker.
+fn JBits.restart(mut self)
+    buf = 0
+    cnt = 0
+    marker = false
+    while pos + 1 < data.len()
+        and not (data[pos] == 0xff and data[pos + 1] >= 0xd0 and data[pos + 1] <= 0xd7)
+        pos += 1
+    pos += 2
+
+fn extend(v int, s int) int
+    if s == 0
+        return 0
+    if v < 1.shl(s - 1) then v - 1.shl(s) + 1 else v
+
+## The 8 by 8 one-dimensional DCT basis, `[u, x]`: C(u)/2 cos((2x+1)u pi/16).
+IDCT1 := idct_matrix()
+
+fn idct_matrix() List[float]
+    # cos(k pi / 16) for k in 0..32, by its Taylor series (std has no cos).
+    mut c := List[float]()
+    for k in 0..32
+        t := k.to_float() * 3.141592653589793 / 16.0
+        r := if t > 3.141592653589793 then t - 6.283185307179586 else t
+        mut term := 1.0
+        mut sum := 1.0
+        for i in 1..20
+            term = -term * r * r / ((2 * i - 1) * (2 * i)).to_float()
+            sum += term
+        c.push(sum)
+    mut m := List[float]()
+    for u in 0..8
+        cu := if u == 0 then 0.7071067811865476 else 1.0
+        for x in 0..8
+            m.push(cu / 2.0 * c[(2 * x + 1) * u % 32])
+    m
+
+fn u16(d List[int], at int) int
+    d[at] * 256 + d[at + 1]
+
+## A frame being decoded: its size, components, and per-component planes of
+## pixels after the inverse DCT (`strides` in blocks).
+struct Frame
+    w int
+    h int
+    comps List[Comp]
+    planes List[List[float]]
+    strides List[int]
+    transform int
+
+## The scan state that survives from block to block.
+struct ScanState
+    pred List[int]
+    eobrun int
+
+## Pixels of a coefficient plane `rows` by `stride` blocks: the inverse DCT
+## is separable, so each block takes a pass along its rows and one along its
+## columns with the 8 by 8 basis (T.81 A.3.3), then the level shift.
+fn idct_plane(f List[float], rows int, stride int) List[float]
+    if rows == 0
+        return []
+    w8 := stride * 8
+    mut out := [0.0 for _ in 0..rows * 8 * w8]
+    mut tmp := [0.0 for _ in 0..64]
+    for by in 0..rows
+        for bx in 0..stride
+            corner := by * 8 * w8 + bx * 8
+            # Along x: tmp[u][x] = sum over v of coef[u][v] * basis[v][x].
+            for u in 0..8
+                for x in 0..8
+                    mut sum := 0.0
+                    for v in 0..8
+                        sum += f[corner + u * w8 + v] * IDCT1[v * 8 + x]
+                    tmp[u * 8 + x] = sum
+            # Along y: pixel[y][x] = sum over u of basis[u][y] * tmp[u][x].
+            for y in 0..8
+                for x in 0..8
+                    mut sum := 0.0
+                    for u in 0..8
+                        sum += IDCT1[u * 8 + y] * tmp[u * 8 + x]
+                    out[corner + y * w8 + x] = sum + 128.0
+    out
+
+fn clamp(v float) int
+    v.round().to_int().max(0).min(255)
+
+## Decodes a Huffman symbol, or -1 for a code that is not in the table.
+fn JBits.symbol(mut self, h Huff) int
+    if cnt < 16
+        fill()
+    e := h.lut[buf.shr(cnt - 16).bit_and(0xffff)]
+    if e == 0
+        return -1
+    cnt -= e / 256
+    e % 256
+
+## A baseline or extended-sequential block: DC then all 63 AC coefficients.
+## False when the data is not a valid code.
+fn block_seq(
+    mut b JBits,
+    mut coef List[int],
+    corner int,
+    pw int,
+    ci int,
+    dc Huff,
+    ac Huff,
+    mut st ScanState,
+) bool
+    t := b.symbol(dc)
+    if t < 0 or t > 16
+        return false
+    st.pred[ci] += extend(b.bits(t), t)
+    coef[corner] = st.pred[ci]
+    mut k := 1
+    while k < 64
+        rs := b.symbol(ac)
+        if rs < 0
+            return false
+        r := rs.shr(4)
+        sz := rs.bit_and(15)
+        if sz == 0
+            if r == 15
+                k += 16
+                continue
+            break
+        k += r
+        if k > 63
+            break
+        z := ZIGZAG[k]
+        coef[corner + z / 8 * pw + z % 8] = extend(b.bits(sz), sz)
+        k += 1
+    true
+
+## A progressive DC block: the first scan sets the high bits, later ones add
+## a bit each (G.1.2.1).
+fn block_dc(
+    mut b JBits,
+    mut coef List[int],
+    corner int,
+    ci int,
+    dc Huff,
+    ah int,
+    al int,
+    mut st ScanState,
+) bool
+    if ah > 0
+        if b.bits(1) != 0
+            coef[corner] = coef[corner].bit_or(1.shl(al))
+        return true
+    t := b.symbol(dc)
+    if t < 0 or t > 16
+        return false
+    st.pred[ci] += extend(b.bits(t), t)
+    coef[corner] = st.pred[ci].shl(al)
+    true
+
+## A progressive AC block of the first scan of a band (G.1.2.2).
+fn block_ac_first(
+    mut b JBits,
+    mut coef List[int],
+    corner int,
+    pw int,
+    ac Huff,
+    ss int,
+    se int,
+    al int,
+    mut st ScanState,
+) bool
+    if st.eobrun > 0
+        st.eobrun -= 1
+        return true
+    mut k := ss
+    while k <= se
+        rs := b.symbol(ac)
+        if rs < 0
+            return false
+        r := rs.shr(4)
+        s := rs.bit_and(15)
+        if s == 0
+            if r < 15
+                st.eobrun = 1.shl(r) - 1
+                if r > 0
+                    st.eobrun += b.bits(r)
+                break
+            k += 16
+            continue
+        k += r
+        if k > se
+            break
+        z := ZIGZAG[k]
+        coef[corner + z / 8 * pw + z % 8] = extend(b.bits(s), s).shl(al)
+        k += 1
+    true
+
+## Refines one coefficient already known to be non-zero with the next bit.
+fn refine_one(mut b JBits, mut coef List[int], at int, p1 int)
+    if b.bits(1) != 0
+        v := coef[at]
+        if v.bit_and(p1) == 0
+            coef[at] = if v >= 0 then v + p1 else v - p1
+
+## A progressive AC refinement block (G.1.2.3): correction bits for the
+## coefficients that are already non-zero, and new +1/-1 ones at the
+## positions the run lengths name.
+fn block_ac_refine(
+    mut b JBits,
+    mut coef List[int],
+    corner int,
+    pw int,
+    ac Huff,
+    ss int,
+    se int,
+    al int,
+    mut st ScanState,
+) bool
+    p1 := 1.shl(al)
+    mut k := ss
+    if st.eobrun == 0
+        while k <= se
+            rs := b.symbol(ac)
+            if rs < 0
+                return false
+            mut r := rs.shr(4)
+            mut s := rs.bit_and(15)
+            if s != 0
+                s = if b.bits(1) != 0 then p1 else 0 - p1
+            elif r != 15
+                st.eobrun = 1.shl(r)
+                if r > 0
+                    st.eobrun += b.bits(r)
+                break
+            while k <= se
+                z := ZIGZAG[k]
+                at := corner + z / 8 * pw + z % 8
+                if coef[at] != 0
+                    refine_one(mut b, mut coef, at, p1)
+                else
+                    r -= 1
+                    if r < 0
+                        break
+                k += 1
+            if s != 0 and k <= se
+                z := ZIGZAG[k]
+                coef[corner + z / 8 * pw + z % 8] = s
+            k += 1
+    if st.eobrun > 0
+        while k <= se
+            z := ZIGZAG[k]
+            at := corner + z / 8 * pw + z % 8
+            if coef[at] != 0
+                refine_one(mut b, mut coef, at, p1)
+            k += 1
+        st.eobrun -= 1
+    true
+
+## Decodes one scan into the coefficient grids. `sel` are the component
+## indexes in the scan; `ss`, `se`, `ah`, `al` are the spectral band and the
+## successive approximation of a progressive scan (0, 63, 0, 0 for a
+## sequential one). Stops quietly at data that is not valid.
+fn scan(
+    mut b JBits,
+    comps List[Comp],
+    sel List[int],
+    dc List[Huff],
+    ac List[Huff],
+    w int,
+    h int,
+    ri int,
+    ss int,
+    se int,
+    ah int,
+    al int,
+    prog bool,
+    strides List[int],
+    mut coefs List[List[int]],
+)
+    hmax := [c.h for c in comps].max() else 1
+    vmax := [c.v for c in comps].max() else 1
+    mcux := (w + 8 * hmax - 1) / (8 * hmax)
+    mcuy := (h + 8 * vmax - 1) / (8 * vmax)
+    mut st := ScanState(pred: [0 for _ in comps], eobrun: 0)
+    mut count := 0
+    single := sel.len() == 1
+    nx := if single then ((w * comps[sel[0]].h + hmax - 1) / hmax + 7) / 8 else mcux
+    ny := if single then ((h * comps[sel[0]].v + vmax - 1) / vmax + 7) / 8 else mcuy
+    for my in 0..ny
+        for mx in 0..nx
+            if ri > 0 and count > 0 and count % ri == 0
+                b.restart()
+                st.pred = [0 for _ in comps]
+                st.eobrun = 0
+            count += 1
+            for ci in sel
+                c := comps[ci]
+                pw := strides[ci] * 8
+                nu := if single then 1 else c.h
+                nv := if single then 1 else c.v
+                for v in 0..nv
+                    for u in 0..nu
+                        bx := if single then mx else mx * c.h + u
+                        by := if single then my else my * c.v + v
+                        corner := by * 8 * pw + bx * 8
+                        ok := if not prog then block_seq(
+                            mut b,
+                            mut coefs[ci],
+                            corner,
+                            pw,
+                            ci,
+                            dc[c.td],
+                            ac[c.ta],
+                            mut st,
+                        ) else if ss
+                            == 0 then block_dc(
+                                mut b,
+                                mut coefs[ci],
+                                corner,
+                                ci,
+                                dc[c.td],
+                                ah,
+                                al,
+                                mut st,
+                            ) else if ah
+                            == 0 then block_ac_first(
+                                mut b,
+                                mut coefs[ci],
+                                corner,
+                                pw,
+                                ac[c.ta],
+                                ss,
+                                se,
+                                al,
+                                mut st,
+                            ) else block_ac_refine(mut b, mut coefs[ci], corner, pw, ac[c.ta], ss, se, al, mut st)
+                        if not ok
+                            return
+    while b.pos < b.data.len() and not b.marker
+        b.fill()
+        b.cnt = 0
+
+## Reads the frame: marker segments and scans until the end of the image.
+fn frame(d List[int]) Frame ! ImageError
+    if d.len() < 4 or d[0] != 0xff or d[1] != 0xd8
+        return Bad(why: "no JPEG start of image")
+    mut qt := [List[int]() for _ in 0..4]
+    mut dc := [Huff(lut: []) for _ in 0..4]
+    mut ac := [Huff(lut: []) for _ in 0..4]
+    mut comps := List[Comp]()
+    mut w := 0
+    mut h := 0
+    mut ri := 0
+    mut transform := -1
+    mut prog := false
+    mut strides := List[int]()
+    mut brows := List[int]()
+    mut coefs := List[List[int]]()
+    mut p := 2
+    while p + 4 <= d.len()
+        if d[p] != 0xff
+            p += 1
+            continue
+        m := d[p + 1]
+        if m == 0xd8 or m == 0x01 or (m >= 0xd0 and m <= 0xd7) or m == 0xff
+            p += if m == 0xff then 1 else 2
+            continue
+        if m == 0xd9
+            break
+        n := u16(d, p + 2)
+        s := p + 4
+        e := p + 2 + n
+        if e > d.len()
+            if comps.len() == 0
+                return Bad(why: "JPEG segment runs past the end")
+            break
+        if m == 0xc3
+            or m == 0xc5
+            or m == 0xc6
+            or m == 0xc7
+            or m == 0xc9
+            or m == 0xca
+            or m == 0xcb
+            or m == 0xcd
+            or m == 0xce
+            or m == 0xcf
+            return Unsupported(what: "JPEG process {m.to_hex()}")
+        if m == 0xc0 or m == 0xc1 or m == 0xc2
+            if d[s] != 8
+                return Unsupported(what: "{d[s]}-bit JPEG samples")
+            prog = m == 0xc2
+            h = u16(d, s + 1)
+            w = u16(d, s + 3)
+            nc := d[s + 5]
+            if w == 0 or h == 0 or nc == 0 or nc > 4
+                return Bad(why: "JPEG frame of {w}x{h} with {nc} components")
+            comps = List[Comp]()
+            for i in 0..nc
+                q := s + 6 + i * 3
+                comps.push(Comp(
+                    id: d[q],
+                    h: d[q + 1].shr(4),
+                    v: d[q + 1].bit_and(15),
+                    tq: d[q + 2],
+                    td: 0,
+                    ta: 0,
+                ))
+            hmax := [c.h for c in comps].max() else 1
+            vmax := [c.v for c in comps].max() else 1
+            mcux := (w + 8 * hmax - 1) / (8 * hmax)
+            mcuy := (h + 8 * vmax - 1) / (8 * vmax)
+            strides = [mcux * c.h for c in comps]
+            brows = [mcuy * c.v for c in comps]
+            coefs = [[0 for _ in 0..brows[i] * strides[i] * 64] for i in 0..nc]
+        elif m == 0xc4
+            mut q := s
+            while q < e
+                tc := d[q].shr(4)
+                th := d[q].bit_and(3)
+                counts := d[q + 1..q + 17]
+                total := counts.sum()
+                t := huff_table(counts, d[q + 17..q + 17 + total])
+                if tc == 0
+                    dc[th] = t
+                else
+                    ac[th] = t
+                q += 17 + total
+        elif m == 0xdb
+            mut q := s
+            while q < e
+                prec := d[q].shr(4)
+                tq := d[q].bit_and(3)
+                if prec == 0
+                    qt[tq] = d[q + 1..q + 65]
+                    q += 65
+                else
+                    qt[tq] = [u16(d, q + 1 + 2 * i) for i in 0..64]
+                    q += 129
+        elif m == 0xdd
+            ri = u16(d, s)
+        elif m == 0xee and n >= 14
+            transform = d[s + 11]
+        elif m == 0xda
+            if comps.len() == 0
+                return Bad(why: "JPEG scan before the frame header")
+            ns := d[s]
+            mut sel := List[int]()
+            for i in 0..ns
+                id := d[s + 1 + i * 2]
+                for ci in 0..comps.len()
+                    if comps[ci].id == id
+                        comps[ci].td = d[s + 2 + i * 2].shr(4)
+                        comps[ci].ta = d[s + 2 + i * 2].bit_and(15)
+                        sel.push(ci)
+            if sel.len() == 0
+                return Bad(why: "JPEG scan names no component")
+            ss := d[s + 1 + ns * 2]
+            se := d[s + 2 + ns * 2]
+            ah := d[s + 3 + ns * 2].shr(4)
+            al := d[s + 3 + ns * 2].bit_and(15)
+            mut bits := JBits(data: d, pos: e, buf: 0, cnt: 0, marker: false)
+            if prog
+                scan(
+                    mut bits,
+                    comps,
+                    sel,
+                    dc,
+                    ac,
+                    w,
+                    h,
+                    ri,
+                    ss,
+                    se.min(63),
+                    ah,
+                    al,
+                    true,
+                    strides,
+                    mut coefs,
+                )
+            else
+                scan(mut bits, comps, sel, dc, ac, w, h, ri, 0, 63, 0, 0, false, strides, mut coefs)
+            p = bits.pos
+            continue
+        p = e
+    if comps.len() == 0
+        return Bad(why: "no JPEG frame")
+    # Dequantize and run the inverse DCT on each plane.
+    mut planes := List[List[float]]()
+    for ci in 0..comps.len()
+        q := qt[comps[ci].tq]
+        if q.len() < 64
+            return Bad(why: "JPEG quantization table {comps[ci].tq} is missing")
+        mut qn := [0 for _ in 0..64]
+        for k in 0..64
+            qn[ZIGZAG[k]] = q[k]
+        pw := strides[ci] * 8
+        grid := coefs[ci]
+        mut f := [0.0 for _ in 0..brows[ci] * 8 * pw]
+        for row in 0..brows[ci] * 8
+            qrow := row % 8 * 8
+            base := row * pw
+            for col in 0..pw
+                f[base + col] = (grid[base + col] * qn[qrow + col % 8]).to_float()
+        planes.push(idct_plane(f, brows[ci], strides[ci]))
+    Frame(w: w, h: h, comps: comps, planes: planes, strides: strides, transform: transform)
+
+## Component `ci` at full resolution, `w * h` values row by row. A
+## subsampled component is upsampled with a triangle filter on centred sample
+## positions (what libjpeg's "fancy upsampling" does for 2x), clamped at the
+## edges.
+fn Frame.full(self, ci int, hmax int, vmax int) List[float]
+    c := comps[ci]
+    pw := strides[ci] * 8
+    mut out := List[float]()
+    if c.h == hmax and c.v == vmax
+        for y in 0..h
+            out.extend(planes[ci][y * pw..y * pw + w])
+        return out
+    cw := (w * c.h + hmax - 1) / hmax
+    chh := (h * c.v + vmax - 1) / vmax
+    mut xa := [0 for _ in 0..w]
+    mut xb := [0 for _ in 0..w]
+    mut tx := [0.0 for _ in 0..w]
+    for x in 0..w
+        fx := (x.to_float() + 0.5) * c.h.to_float() / hmax.to_float() - 0.5
+        x0 := fx.floor().to_int()
+        xa[x] = x0.max(0).min(cw - 1)
+        xb[x] = (x0 + 1).max(0).min(cw - 1)
+        tx[x] = fx - x0.to_float()
+    # Each source row stretched to the image width.
+    mut wide := [0.0 for _ in 0..chh * w]
+    for sy in 0..chh
+        base := sy * pw
+        for x in 0..w
+            wide[sy * w + x] = planes[ci][base + xa[x]] * (1.0 - tx[x])
+                + planes[ci][base + xb[x]] * tx[x]
+    out = [0.0 for _ in 0..w * h]
+    for y in 0..h
+        fy := (y.to_float() + 0.5) * c.v.to_float() / vmax.to_float() - 0.5
+        y0 := fy.floor().to_int()
+        ty := fy - y0.to_float()
+        ra := y0.max(0).min(chh - 1) * w
+        rb := (y0 + 1).max(0).min(chh - 1) * w
+        for x in 0..w
+            out[y * w + x] = wide[ra + x] * (1.0 - ty) + wide[rb + x] * ty
+    out
+
+## Decodes a baseline, extended sequential or progressive Huffman JPEG to
+## grey: the luma of YCbCr, the grey of one component, or the weighted sum of
+## RGB.
+pub fn jpeg(d List[int]) Gray ! ImageError
+    f := frame(d)?
+    hmax := [c.h for c in f.comps].max() else 1
+    vmax := [c.v for c in f.comps].max() else 1
+    rgb := f.comps.len() == 3 and f.transform == 0
+    if f.comps.len() == 4
+        return Unsupported(what: "four-component (CMYK) JPEG")
+    if not rgb
+        return Gray(width: f.w, height: f.h, px: [clamp(v) for v in f.full(0, hmax, vmax)])
+    a := f.full(0, hmax, vmax)
+    b := f.full(1, hmax, vmax)
+    c := f.full(2, hmax, vmax)
+    Gray(width: f.w, height: f.h, px: [
+        clamp(a[i] * 0.299 + b[i] * 0.587 + c[i] * 0.114)
+        for i in 0..a.len()
+    ])
+
+## Decodes a JPEG to colour. Three components are YCbCr unless an Adobe
+## marker says RGB (or the component ids are R, G, B); four are CMYK or
+## YCCK in Adobe's inverted form.
+pub fn jpeg_rgb(d List[int]) Rgba ! ImageError
+    f := frame(d)?
+    hmax := [c.h for c in f.comps].max() else 1
+    vmax := [c.v for c in f.comps].max() else 1
+    n := f.comps.len()
+    rgb := n == 3
+        and (f.transform == 0 or (f.comps[0].id == 82 and f.comps[1].id == 71 and f.comps[2].id == 66))
+    count := f.w * f.h
+    p0 := f.full(0, hmax, vmax)
+    mut px := [0 for _ in 0..count]
+    if n == 1 or n == 2
+        for i in 0..count
+            g := clamp(p0[i])
+            px[i] = 0xff000000.bit_or(g.shl(16)).bit_or(g.shl(8)).bit_or(g)
+        return Rgba(width: f.w, height: f.h, px: px)
+    p1 := f.full(1, hmax, vmax)
+    p2 := f.full(2, hmax, vmax)
+    p3 := if n == 4 then f.full(3, hmax, vmax) else []
+    direct := rgb or (n == 4 and f.transform != 2)
+    for i in 0..count
+        mut r := 0
+        mut g := 0
+        mut b := 0
+        if direct
+            r = clamp(p0[i])
+            g = clamp(p1[i])
+            b = clamp(p2[i])
+        else
+            y := p0[i]
+            cb := p1[i] - 128.0
+            cr := p2[i] - 128.0
+            r = clamp(y + 1.402 * cr)
+            g = clamp(y - 0.344136 * cb - 0.714136 * cr)
+            b = clamp(y + 1.772 * cb)
+        if n == 4
+            k := clamp(p3[i])
+            r = r * k / 255
+            g = g * k / 255
+            b = b * k / 255
+        px[i] = 0xff000000.bit_or(r.shl(16)).bit_or(g.shl(8)).bit_or(b)
+    Rgba(width: f.w, height: f.h, px: px)
