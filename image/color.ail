@@ -36,6 +36,33 @@ pub fn decode(data List[int]) Rgba ! ImageError
         return gif(data)
     Unsupported(what: "image data that is not PNG, JPEG or GIF")
 
+## The `[width, height]` of a PNG, JPEG or GIF read from its header alone, or
+## `[0, 0]` when `data` is none of them. The browser sizes `<img>` with it
+## without decoding the pixels.
+pub fn dims(data List[int]) List[int]
+    n := data.len()
+    if n >= 24 and data[0] == 0x89 and data[1] == 0x50
+        return [be32(data, 16), be32(data, 20)]
+    if n >= 10 and data[0] == 0x47 and data[1] == 0x49 and data[2] == 0x46
+        return [data[6] + data[7] * 256, data[8] + data[9] * 256]
+    if n >= 4 and data[0] == 0xff and data[1] == 0xd8
+        mut i := 2
+        while i + 9 < n
+            if data[i] != 0xff
+                i += 1
+                continue
+            m := data[i + 1]
+            if m == 0xff
+                i += 1
+                continue
+            if m == 0xd8 or m == 0x01 or (m >= 0xd0 and m <= 0xd7)
+                i += 2
+                continue
+            if m >= 0xc0 and m <= 0xcf and m != 0xc4 and m != 0xc8 and m != 0xcc
+                return [data[i + 7] * 256 + data[i + 8], data[i + 5] * 256 + data[i + 6]]
+            i += 2 + data[i + 2] * 256 + data[i + 3]
+    [0, 0]
+
 # ---- tests against tools/pdf/image/testdata (see make_fixtures.py) ----
 
 DATA := "tools/pdf/image/testdata"
@@ -116,3 +143,9 @@ fn load(name str, ext str) List[int] ! fs.IoError
     a := decode([1, 2, 3]) else Rgba.new(0, 0, 0)
     b := decode([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]) else Rgba.new(0, 0, 0)
     assert_eq(a.width + b.width, 0)
+
+@test fn dims_reads_each_format_header() !
+    for pair in [["gray8", "png"], ["jpeg420_prog", "jpg"], ["jpeg444", "jpg"], ["gif24", "gif"]]
+        got := dims(load(pair[0], pair[1])?)
+        assert_eq(got, [37, 29])
+    assert_eq(dims([1, 2, 3]), [0, 0])
