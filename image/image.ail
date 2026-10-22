@@ -627,7 +627,7 @@ fn scan(
     mut brows := [0 for _ in comps]
     for ci in sel
         c := comps[ci]
-        brows[ci] = if single then ((h * c.v + vmax - 1) / vmax + 7) / 8 else mcuy * c.v
+        brows[ci] = if single then((h * c.v + vmax - 1) / vmax + 7) / 8 else mcuy * c.v
     mut grids := [List[float]() for _ in comps]
     for ci in sel
         grids[ci] = [0.0 for _ in 0..brows[ci] * strides[ci] * 64]
