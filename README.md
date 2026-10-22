@@ -74,3 +74,12 @@ shapes don't include), rendered with `pdftoppm` and compressed with
 Pillow; `scan-ocr.txt` is its OCR output, which matches the source text
 exactly. Rebuilding the shapes can change it: check it against the source
 before updating it.
+
+## Colour images (Garlic)
+
+`tools/pdf/image` also decodes web images: `image.decode(bytes)` returns an
+`Rgba` (`px[y * width + x]` as `0xAARRGGBB`) for PNG (every colour type and
+depth, tRNS, Adam7), JPEG (baseline and progressive, any subsampling, restart
+intervals, YCbCr, RGB, CMYK) and the first frame of a GIF. `image.dims` reads
+a size from the header alone. Garlic imports the module with `dep image path
+../pdf/image caps fs`. Regenerate the fixtures with `testdata/make_fixtures.py`.

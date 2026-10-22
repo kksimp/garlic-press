@@ -1,0 +1,175 @@
+## GIF decoding (GIF89a, CompuServe): the first frame, on a canvas of the
+## logical screen size, with the graphic control extension's transparent
+## colour (those pixels are fully transparent). Later frames are ignored.
+
+fn le16(d List[int], at int) int
+    d[at].bit_or(d[at + 1].shl(8))
+
+## The colour table of `n` entries at `at` as `0xAARRGGBB`.
+fn gif_table(d List[int], at int, n int) List[int]
+    [
+        0xff000000
+            .bit_or(d[at + 3 * i].shl(16))
+            .bit_or(d[at + 3 * i + 1].shl(8))
+            .bit_or(d[at + 3 * i + 2])
+        for i in 0..n
+    ]
+
+## The data sub-blocks starting at `at`: the bytes, and the offset after them.
+fn gif_blocks(d List[int], at int) List[int]
+    mut p := at
+    mut out := List[int]()
+    while p < d.len() and d[p] != 0
+        n := d[p]
+        if p + 1 + n > d.len()
+            out.extend(d[p + 1..])
+            p = d.len()
+            break
+        out.extend(d[p + 1..p + 1 + n])
+        p += 1 + n
+    out.push(-1)
+    out.push(p + 1)
+    out
+
+## LZW (variable code size, least significant bit first) to `want` indexes.
+fn gif_lzw(data List[int], mcs int, want int) List[int]
+    clear := 1.shl(mcs)
+    eoi := clear + 1
+    mut prefix := [0 for _ in 0..4096]
+    mut suffix := [0 for _ in 0..4096]
+    for i in 0..clear
+        suffix[i] = i
+    mut out := List[int]()
+    mut size := mcs + 1
+    mut next := clear + 2
+    mut old := -1
+    mut buf := 0
+    mut have := 0
+    mut pos := 0
+    mut stack := List[int]()
+    while out.len() < want
+        while have < size and pos < data.len()
+            buf = buf.bit_or(data[pos].shl(have))
+            have += 8
+            pos += 1
+        if have < size
+            break
+        code := buf.bit_and(1.shl(size) - 1)
+        buf = buf.shr(size)
+        have -= size
+        if code == clear
+            size = mcs + 1
+            next = clear + 2
+            old = -1
+            continue
+        if code == eoi
+            break
+        mut c := code
+        stack = List[int]()
+        if code >= next
+            if old < 0
+                break
+            c = old
+        while c >= clear
+            stack.push(suffix[c])
+            c = prefix[c]
+        first := c
+        stack.push(first)
+        if code >= next
+            # The KwKwK case: the new entry is the old string plus its first byte.
+            out.extend(reversed(stack[1..]))
+            out.push(first)
+            out.push(first)
+            out = out
+        else
+            for i in 0..stack.len()
+                out.push(stack[stack.len() - 1 - i])
+        if old >= 0 and next < 4096
+            prefix[next] = old
+            suffix[next] = first
+            next += 1
+            if next == 1.shl(size) and size < 12
+                size += 1
+        old = code
+    out
+
+fn reversed(xs List[int]) List[int]
+    [xs[xs.len() - 1 - i] for i in 0..xs.len()]
+
+## Decodes the first frame of a GIF to colour.
+pub fn gif(d List[int]) Rgba ! ImageError
+    if d.len() < 13 or d[0] != 0x47 or d[1] != 0x49 or d[2] != 0x46
+        return Bad(why: "no GIF header")
+    w := le16(d, 6)
+    h := le16(d, 8)
+    if w == 0 or h == 0
+        return Bad(why: "GIF of {w}x{h}")
+    flags := d[10]
+    mut p := 13
+    mut global := List[int]()
+    if flags.bit_and(128) != 0
+        n := 1.shl(flags.bit_and(7) + 1)
+        if p + 3 * n > d.len()
+            return Bad(why: "GIF colour table is cut off")
+        global = gif_table(d, p, n)
+        p += 3 * n
+    mut trans := -1
+    mut out := Rgba.new(w, h, 0)
+    while p < d.len()
+        b := d[p]
+        if b == 0x21
+            label := d[p + 1]
+            blk := gif_blocks(d, p + 2)
+            if label == 0xf9 and blk.len() >= 6
+                if blk[0].bit_and(1) != 0
+                    trans = blk[3]
+            p = blk[blk.len() - 1]
+        elif b == 0x2c
+            if p + 10 > d.len()
+                return Bad(why: "GIF image descriptor is cut off")
+            left := le16(d, p + 1)
+            top := le16(d, p + 3)
+            fw := le16(d, p + 5)
+            fh := le16(d, p + 7)
+            fl := d[p + 9]
+            p += 10
+            mut table := global
+            if fl.bit_and(128) != 0
+                n := 1.shl(fl.bit_and(7) + 1)
+                if p + 3 * n > d.len()
+                    return Bad(why: "GIF colour table is cut off")
+                table = gif_table(d, p, n)
+                p += 3 * n
+            if table.len() == 0
+                return Bad(why: "GIF without a colour table")
+            if p >= d.len()
+                return Bad(why: "GIF image data is missing")
+            mcs := d[p]
+            if mcs < 2 or mcs > 8
+                return Bad(why: "GIF code size {mcs}")
+            blk := gif_blocks(d, p + 1)
+            idx := gif_lzw(blk[0..blk.len() - 2], mcs, fw * fh)
+            # Interlaced frames store rows in four passes.
+            mut order := [y for y in 0..fh]
+            if fl.bit_and(64) != 0
+                order = List[int]()
+                for pass in 0..4
+                    start := [0, 4, 2, 1][pass]
+                    step := [8, 8, 4, 2][pass]
+                    mut y := start
+                    while y < fh
+                        order.push(y)
+                        y += step
+            for i in 0..idx.len().min(fw * fh)
+                y := top + order[i / fw]
+                x := left + i % fw
+                if x < w and y < h
+                    v := idx[i]
+                    if v != trans and v < table.len()
+                        out.px[y * w + x] = table[v]
+            return out
+        elif b == 0x3b
+            break
+        else
+            p += 1
+    Bad(why: "GIF without an image")

@@ -1,0 +1,157 @@
+## Colour images for the browser: the `Rgba` bitmap and `decode`, which picks
+## the PNG, JPEG or GIF decoder from the first bytes (ADR 0512). Written from
+## the formats' specifications: PNG (RFC 2083, with Adam7), JPEG (T.81) and
+## GIF89a (first frame only).
+
+## Pixels row by row, `px[y * width + x]` as `0xAARRGGBB` (alpha 255 is opaque).
+pub struct Rgba
+    pub width int
+    pub height int
+    pub px List[int]
+
+pub fn Rgba.new(width int, height int, color int) Rgba
+    Rgba(width: width, height: height, px: [color for _ in 0..width * height])
+
+## The image as bytes `R, G, B, A` per pixel, for a window's bitmap surface.
+pub fn Rgba.bytes(self) List[int]
+    mut out := List[int]()
+    for p in px
+        out.push(p.shr(16).bit_and(255))
+        out.push(p.shr(8).bit_and(255))
+        out.push(p.bit_and(255))
+        out.push(p.shr(24).bit_and(255))
+    out
+
+## The image `data` (PNG, JPEG or GIF by its first bytes) as colour.
+pub fn decode(data List[int]) Rgba ! ImageError
+    if data.len() >= 8
+        and data[0] == 0x89
+        and data[1] == 0x50
+        and data[2] == 0x4e
+        and data[3] == 0x47
+        return png(data)
+    if data.len() >= 3 and data[0] == 0xff and data[1] == 0xd8
+        return jpeg_rgb(data)
+    if data.len() >= 6 and data[0] == 0x47 and data[1] == 0x49 and data[2] == 0x46
+        return gif(data)
+    Unsupported(what: "image data that is not PNG, JPEG or GIF")
+
+## The `[width, height]` of a PNG, JPEG or GIF read from its header alone, or
+## `[0, 0]` when `data` is none of them. The browser sizes `<img>` with it
+## without decoding the pixels.
+pub fn dims(data List[int]) List[int]
+    n := data.len()
+    if n >= 24 and data[0] == 0x89 and data[1] == 0x50
+        return [be32(data, 16), be32(data, 20)]
+    if n >= 10 and data[0] == 0x47 and data[1] == 0x49 and data[2] == 0x46
+        return [data[6] + data[7] * 256, data[8] + data[9] * 256]
+    if n >= 4 and data[0] == 0xff and data[1] == 0xd8
+        mut i := 2
+        while i + 9 < n
+            if data[i] != 0xff
+                i += 1
+                continue
+            m := data[i + 1]
+            if m == 0xff
+                i += 1
+                continue
+            if m == 0xd8 or m == 0x01 or (m >= 0xd0 and m <= 0xd7)
+                i += 2
+                continue
+            if m >= 0xc0 and m <= 0xcf and m != 0xc4 and m != 0xc8 and m != 0xcc
+                return [data[i + 7] * 256 + data[i + 8], data[i + 5] * 256 + data[i + 6]]
+            i += 2 + data[i + 2] * 256 + data[i + 3]
+    [0, 0]
+
+# ---- tests against tools/pdf/image/testdata (see make_fixtures.py) ----
+
+## The fixtures, from the repository root or from `bootstrap/` (the selftest's
+## directory).
+fn data_dir() str
+    for d in ["tools/pdf/image/testdata", "../tools/pdf/image/testdata"]
+        if fs.exists(d)
+            return d
+    "tools/pdf/image/testdata"
+
+## The largest and the total absolute channel difference between `img` and
+## the expected `NAME.rgba` bytes.
+fn off_by(img Rgba, name str) List[int] ! fs.IoError
+    want := fs.read_bytes("{data_dir()}/{name}.rgba")?.to_list()
+    got := img.bytes()
+    if want.len() != got.len()
+        return [-1, -1]
+    mut worst := 0
+    mut total := 0
+    for i in 0..want.len()
+        # A fully transparent pixel's colour does not matter.
+        if want[i / 4 * 4 + 3] == 0 and got[i / 4 * 4 + 3] == 0 and i % 4 != 3
+            continue
+        d := (got[i] - want[i].to_int()).abs()
+        worst = worst.max(d)
+        total += d
+    [worst, total]
+
+fn load(name str, ext str) List[int] ! fs.IoError
+    [v.to_int() for v in fs.read_bytes("{data_dir()}/{name}.{ext}")?.to_list()]
+
+@test fn png_decodes_every_colour_type_depth_and_interlace() !
+    names := [
+        "rgb8",
+        "rgb8_adam7",
+        "rgb16",
+        "rgba8",
+        "rgba8_adam7",
+        "gray1",
+        "gray2",
+        "gray4",
+        "gray8",
+        "gray16",
+        "gray8_key",
+        "graya8",
+        "graya8_adam7",
+        "rgb8_key",
+        "pal1",
+        "pal2",
+        "pal4",
+        "pal8",
+        "pal4_adam7",
+    ]
+    for name in names
+        img := decode(load(name, "png")?)?
+        assert_eq((img.width, img.height), (37, 29))
+        assert_eq(off_by(img, name)?, [0, 0])
+
+@test fn jpeg_decodes_baseline_progressive_subsampled_and_restarts() !
+    # The inverse DCT and the chroma upsampling round slightly differently
+    # from the reference decoder: never more than 3 off, half a level on average.
+    for name in [
+        "jpeg444",
+        "jpeg444_prog",
+        "jpeg444_restart",
+        "jpeg420",
+        "jpeg420_prog",
+        "jpeg422",
+        "jpeg_gray",
+        "jpeg_gray_prog",
+    ]
+        img := decode(load(name, "jpg")?)?
+        assert_eq((img.width, img.height), (37, 29))
+        d := off_by(img, name)?
+        assert(d[0] <= 3)
+        assert(d[1] < 37 * 29 * 4 / 2)
+
+@test fn gif_decodes_the_first_frame() !
+    for name in ["gif24", "gif24_interlaced", "gif24_transparent"]
+        img := decode(load(name, "gif")?)?
+        assert_eq(off_by(img, name)?, [0, 0])
+
+@test fn unknown_data_is_refused()
+    a := decode([1, 2, 3]) else Rgba.new(0, 0, 0)
+    b := decode([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]) else Rgba.new(0, 0, 0)
+    assert_eq(a.width + b.width, 0)
+
+@test fn dims_reads_each_format_header() !
+    for pair in [["gray8", "png"], ["jpeg420_prog", "jpg"], ["jpeg444", "jpg"], ["gif24", "gif"]]
+        got := dims(load(pair[0], pair[1])?)
+        assert_eq(got, [37, 29])
+    assert_eq(dims([1, 2, 3]), [0, 0])
