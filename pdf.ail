@@ -7,7 +7,7 @@
 ##     ail run tools/pdf/pdf.ail info FILE
 ##     ail run tools/pdf/pdf.ail outline FILE
 ##     ail run tools/pdf/pdf.ail bench FILE
-##     ail run tools/pdf/pdf.ail view FILE [--page N] [--find TEXT] [--print] [--cols N]
+##     ail run tools/pdf/pdf.ail view FILE [--page N] [--find TEXT] [--print | --screen] [--cols N]
 
 use std.env
 use std.fs
@@ -27,7 +27,7 @@ USAGE := """
       outline FILE                          the bookmarks, with their pages
       bench FILE                            the time each stage of reading takes
       images FILE [--page N] [--out F.pgm]  the page's images, decoded; --out saves the largest
-      view FILE [--page N] [--find TEXT] [--print] [--cols N]
+      view FILE [--page N] [--find TEXT] [--print | --screen] [--cols N]
                                             the text layer in a window; --print shows it here
     """
 
@@ -38,7 +38,7 @@ struct Args
 ## Words and `--flag [value]` options; `--case`, `--json` and `--print`
 ## take no value.
 fn parse_args(raw List[str]) Args
-    bare := {"--case", "--json", "--print", "--first", "--no-ocr"}
+    bare := {"--case", "--json", "--print", "--screen", "--first", "--no-ocr"}
     mut a := Args(words: [], flags: {})
     mut i := 0
     while i < raw.len()
