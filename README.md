@@ -68,7 +68,7 @@ a standard font, a cross-reference stream with an object stream and a PNG
 predictor, an image-only page, a damaged table). `report.pdf` is LibreOffice
 24.2's export of `report.html`, with subset fonts and a ToUnicode CMap. Each
 `NAME.txt` is the expected `pdf text`, checked against `pdftotext`; the
-selftest (`bootstrap/tests/tools.rs`) compares them. `scan-ocr.pdf` is a
+gate's `tools` suite compares them. `scan-ocr.pdf` is a
 300 dpi Group 4 scan of a paragraph set in FreeSerif (a font the reference
 shapes don't include), rendered with `pdftoppm` and compressed with
 Pillow; `scan-ocr.txt` is its OCR output, which matches the source text
