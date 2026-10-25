@@ -201,8 +201,8 @@ fn Lexer.number(mut self) Obj
         pos += 1
     if real
         x := n.to_float() + frac
-        return Obj.Real(x: if neg then - x else x)
-    Obj.Int(n: if neg then - n else n)
+        return Obj.Real(x: if neg then -x else x)
+    Obj.Int(n: if neg then -n else n)
 
 ## A literal string, with nested parentheses and escapes (7.3.4.2).
 fn Lexer.literal(mut self) Obj

@@ -416,7 +416,11 @@ pub fn start(path str, pages reader.Pages, flags Map[str, str])
         print(v.state_json().to_text())
         return
     if flags.contains("--screen")
-        print(scells.of_cells(cols, rows, v.render(), -1, -1).describe(0.0, 0.0, cols.to_float(), rows.to_float(), 3000))
+        print(
+            scells
+                .of_cells(cols, rows, v.render(), -1, -1)
+                .describe(0.0, 0.0, cols.to_float(), rows.to_float(), 3000),
+        )
         return
     if flags.contains("--print")
         for row in widgets.text_rows(v.render(), cols, rows)

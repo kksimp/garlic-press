@@ -38,7 +38,7 @@ fn space_of(doc reader.Doc, cs reader.Obj) Space
         pal := look.as_bytes() else (doc.stream_data(look) else [])
         return Space(comps: 1, palette: pal, base: base.comps, ink: false)
     if kind == "Separation" or kind == "DeviceN"
-        n := if kind == "DeviceN" then(doc.resolve(a[1]).as_arr() else []).len().max(1) else 1
+        n := if kind == "DeviceN" then (doc.resolve(a[1]).as_arr() else []).len().max(1) else 1
         return Space(comps: n, palette: [], base: 0, ink: true)
     if kind == "CalRGB" or kind == "Lab"
         return named("DeviceRGB")
