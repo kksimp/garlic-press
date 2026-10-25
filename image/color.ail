@@ -63,11 +63,11 @@ pub fn dims(data List[int]) List[int]
             i += 2 + data[i + 2] * 256 + data[i + 3]
     [0, 0]
 
-# ---- tests against tools/pdf/image/testdata (see make_fixtures.py) ----
+# ---- tests against image/testdata (see make_fixtures.py) ----
 
 ## The fixtures, from the repository root (the gate's directory).
 fn data_dir() str
-    "tools/pdf/image/testdata"
+    "image/testdata"
 
 ## The largest and the total absolute channel difference between `img` and
 ## the expected `NAME.rgba` bytes.

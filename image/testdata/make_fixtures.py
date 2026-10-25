@@ -1,10 +1,10 @@
 """Writes the small image fixtures in this directory for the decoders in
-tools/pdf/image (PNG, JPEG, GIF). Each NAME.png/.jpg/.gif has a NAME.rgba
+image (PNG, JPEG, GIF). Each NAME.png/.jpg/.gif has a NAME.rgba
 beside it: the expected decode as R, G, B, A bytes row by row, from this
 script's own arithmetic for PNG (lossless, exact) and from Pillow's decoder for
 JPEG and GIF. Fixture generator only; the tests are in color.ail.
 
-    python3 tools/pdf/image/testdata/make_fixtures.py
+    python3 image/testdata/make_fixtures.py
 """
 import os
 import struct

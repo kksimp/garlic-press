@@ -1,27 +1,31 @@
-# pdf: read, search and view PDFs, written in AIL
+# Garlic Press: read, search and view PDFs, written in AIL
 
-`tools/pdf` reads a PDF's text layer: each glyph's text from its font's own
+License: AGPL-3.0 (see `LICENSE`). Moved from kksimp/ail (`tools/pdf`) with its history.
+
+Needs the AIL toolchain: clone [kksimp/ail](https://github.com/kksimp/ail) next to this repo at the commit in `.ail-version`. Commands below use `../ail/ail`; `tools/check.sh` runs check, fmt and the tests against that pin. Builds and tests run on a dev machine, not in a container.
+
+`garlic-press` reads a PDF's text layer: each glyph's text from its font's own
 map to Unicode, and its position from the page's matrices, so text is exact
-([ADR 0520](../../docs/decisions/0520-pdf-reader-on-the-text-layer.md),
-[design note](../../docs/design/pdf-viewer.md)). A scanned page (images, no
+([ADR 0520](https://github.com/kksimp/ail/blob/main/docs/decisions/0520-pdf-reader-on-the-text-layer.md),
+[design note](https://github.com/kksimp/ail/blob/main/docs/design/pdf-viewer.md)). A scanned page (images, no
 text) is read by OCR written in AIL, only when it is shown or searched
-([ADR 0512](../../docs/decisions/0512-pdf-ocr-by-nearest-shape.md)).
+([ADR 0512](https://github.com/kksimp/ail/blob/main/docs/decisions/0512-pdf-ocr-by-nearest-shape.md)).
 
 ```sh
-./ail run tools/pdf/pdf.ail text FILE.pdf [--page N]      # the text; pages split by form feeds
-./ail run tools/pdf/pdf.ail grep "phrase" FILE.pdf...     # PAGE: line, for each line with a hit
-./ail run tools/pdf/pdf.ail grep --json "phrase" FILE.pdf # hits with page, line, boxes and spans
-./ail run tools/pdf/pdf.ail json FILE.pdf [--page N]      # the page model for agents
-./ail run tools/pdf/pdf.ail info FILE.pdf                 # pages, metadata, scans, unreadable glyphs
-./ail run tools/pdf/pdf.ail outline FILE.pdf              # bookmarks with their pages
-./ail run tools/pdf/pdf.ail bench FILE.pdf                # milliseconds per stage
-./ail run tools/pdf/pdf.ail view FILE.pdf [--find TEXT]   # the viewer, in a window
-./ail run tools/pdf/pdf.ail view FILE.pdf --find TEXT --keys "n pagedown" --print   # its screen, here
-./ail run tools/pdf/pdf.ail view FILE.pdf --find TEXT --json                        # its state
-./ail run tools/pdf/pdf.ail images FILE.pdf --page N --out F.pgm  # decode a page's images
-./ail run tools/pdf/pdf.ail layout FILE.pdf --page N      # the lines and glyph boxes OCR finds
-./ail run tools/pdf/pdf.ail train FONT.ttf... --out tools/pdf/ocr/shapes.ail  # rebuild OCR's shapes
-./ail test tools/pdf/pdf.ail                              # the headless tests
+../ail/ail run pdf.ail text FILE.pdf [--page N]      # the text; pages split by form feeds
+../ail/ail run pdf.ail grep "phrase" FILE.pdf...     # PAGE: line, for each line with a hit
+../ail/ail run pdf.ail grep --json "phrase" FILE.pdf # hits with page, line, boxes and spans
+../ail/ail run pdf.ail json FILE.pdf [--page N]      # the page model for agents
+../ail/ail run pdf.ail info FILE.pdf                 # pages, metadata, scans, unreadable glyphs
+../ail/ail run pdf.ail outline FILE.pdf              # bookmarks with their pages
+../ail/ail run pdf.ail bench FILE.pdf                # milliseconds per stage
+../ail/ail run pdf.ail view FILE.pdf [--find TEXT]   # the viewer, in a window
+../ail/ail run pdf.ail view FILE.pdf --find TEXT --keys "n pagedown" --print   # its screen, here
+../ail/ail run pdf.ail view FILE.pdf --find TEXT --json                        # its state
+../ail/ail run pdf.ail images FILE.pdf --page N --out F.pgm  # decode a page's images
+../ail/ail run pdf.ail layout FILE.pdf --page N      # the lines and glyph boxes OCR finds
+../ail/ail run pdf.ail train FONT.ttf... --out ocr/shapes.ail  # rebuild OCR's shapes
+../ail/ail test pdf.ail                              # the headless tests
 ```
 
 ## Scans
@@ -35,7 +39,7 @@ raw images are decoded; JBIG2 and JPEG 2000 are not yet. Expect about 1% to
 which hides some of them.
 
 Only the pages a command needs are read
-([ADR 0511](../../docs/decisions/0511-pdf-pages-read-on-demand.md)): `--page
+([ADR 0511](https://github.com/kksimp/ail/blob/main/docs/decisions/0511-pdf-pages-read-on-demand.md)): `--page
 N` reads one, the viewer reads what it shows and searches forward page by
 page, and `grep` prints each page's hits as it goes (`--first` stops at the
 first page with a match). The viewer's `--json` lists the lines visible on
@@ -77,7 +81,7 @@ before updating it.
 
 ## Colour images (Garlic)
 
-`tools/pdf/image` also decodes web images: `image.decode(bytes)` returns an
+`image` also decodes web images: `image.decode(bytes)` returns an
 `Rgba` (`px[y * width + x]` as `0xAARRGGBB`) for PNG (every colour type and
 depth, tRNS, Adam7), JPEG (baseline and progressive, any subsampling, restart
 intervals, YCbCr, RGB, CMYK) and the first frame of a GIF. `image.dims` reads

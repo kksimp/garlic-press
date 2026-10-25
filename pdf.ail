@@ -1,13 +1,13 @@
 ## pdf: read, search and view PDFs by their text layer, written in AIL
 ## (ADR 0520). No OCR: text comes from the fonts' own maps to Unicode.
 ##
-##     ail run tools/pdf/pdf.ail text FILE [--page N]
-##     ail run tools/pdf/pdf.ail grep [--case] [--json] PATTERN FILE...
-##     ail run tools/pdf/pdf.ail json FILE [--page N]
-##     ail run tools/pdf/pdf.ail info FILE
-##     ail run tools/pdf/pdf.ail outline FILE
-##     ail run tools/pdf/pdf.ail bench FILE
-##     ail run tools/pdf/pdf.ail view FILE [--page N] [--find TEXT] [--print | --screen] [--cols N]
+##     ail run pdf.ail text FILE [--page N]
+##     ail run pdf.ail grep [--case] [--json] PATTERN FILE...
+##     ail run pdf.ail json FILE [--page N]
+##     ail run pdf.ail info FILE
+##     ail run pdf.ail outline FILE
+##     ail run pdf.ail bench FILE
+##     ail run pdf.ail view FILE [--page N] [--find TEXT] [--print | --screen] [--cols N]
 
 use std.env
 use std.fs

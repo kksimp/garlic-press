@@ -1,9 +1,9 @@
 """Writes the small hand-made PDFs in this directory (fixture generator
-only; the reader is tools/pdf). Each one exercises a structure: a classic
+only; the reader is pdf.ail). Each one exercises a structure: a classic
 table with a standard font, a cross-reference stream with an object stream
 and a PNG predictor, an image-only page, and a damaged table.
 
-    python3 tools/pdf/testdata/make_fixtures.py
+    python3 testdata/make_fixtures.py
 """
 import os
 import zlib

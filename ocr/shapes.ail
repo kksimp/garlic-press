@@ -1,6 +1,6 @@
 ## Reference glyph shapes for OCR (ADR 0512), made by
 ##
-##     ail run tools/pdf/pdf.ail train FONT.ttf... --out tools/pdf/ocr/shapes.ail
+##     ail run pdf.ail train FONT.ttf... --out ocr/shapes.ail
 ##
 ## from DejaVu Sans, Sans Mono and Serif (Bitstream Vera licence),
 ## Liberation Sans, Serif and Mono, Carlito and Caladea (SIL Open Font
