@@ -65,12 +65,8 @@ pub fn dims(data List[int]) List[int]
 
 # ---- tests against tools/pdf/image/testdata (see make_fixtures.py) ----
 
-## The fixtures, from the repository root or from `bootstrap/` (the selftest's
-## directory).
+## The fixtures, from the repository root (the gate's directory).
 fn data_dir() str
-    for d in ["tools/pdf/image/testdata", "../tools/pdf/image/testdata"]
-        if fs.exists(d)
-            return d
     "tools/pdf/image/testdata"
 
 ## The largest and the total absolute channel difference between `img` and
