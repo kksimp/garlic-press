@@ -1,0 +1,23 @@
+Garlic Press. Licensed under the GNU Affero General Public License v3.0; see LICENSE.
+
+Third-party material
+--------------------
+
+ocr/shapes.ail holds reference glyph shapes for OCR (ink grids
+and outline-edge grids measured from rendered letters; no outlines, no
+font data) derived by AIL's own rasterizer from the fonts below. No font
+file is included in this repository.
+
+- DejaVu Sans, Sans Mono and Serif. Copyright (c) 2003 by Bitstream, Inc.
+  All Rights Reserved; DejaVu changes are in the public domain; Copyright
+  (c) 2006 by Tavmjong Bah. Bitstream Vera Fonts licence:
+  https://dejavu-fonts.github.io/License.html
+- Liberation Sans, Serif and Mono. Digitized data copyright (c) 2010 Google
+  Corporation; Copyright (c) 2012 Red Hat, Inc. SIL Open Font License,
+  Version 1.1: https://openfontlicense.org
+- Carlito. Copyright 2013 The Carlito Project Authors
+  (https://github.com/googlefonts/carlito). SIL Open Font License,
+  Version 1.1.
+- Caladea. Copyright 2012 The Caladea Project Authors
+  (https://github.com/huertatipografica/Caladea). SIL Open Font License,
+  Version 1.1.

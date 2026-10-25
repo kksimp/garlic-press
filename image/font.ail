@@ -115,7 +115,7 @@ fn Font.glyph_at(self, gid int) int
         return -1
     a := if long_loca then u32(data, loca + gid * 4) else u16(data, loca + gid * 2) * 2
     b := if long_loca then u32(data, loca + gid * 4 + 4) else u16(data, loca + gid * 2 + 2) * 2
-    if a == b then - 1 else glyf + a
+    if a == b then -1 else glyf + a
 
 ## A glyph's outline in font units, y up: quadratic pieces
 ## `[x0, y0, cx, cy, x1, y1]` (straight edges have their control point
