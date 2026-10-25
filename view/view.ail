@@ -7,6 +7,7 @@
 
 use std.ui
 use std.ui.widgets
+use std.screen.cells as scells
 use std.io
 use ocr
 use reader
@@ -413,6 +414,9 @@ pub fn start(path str, pages reader.Pages, flags Map[str, str])
             v.on_key(spec[0], spec[1] == "1", spec[2] == "1")
     if flags.contains("--json")
         print(v.state_json().to_text())
+        return
+    if flags.contains("--screen")
+        print(scells.of_cells(cols, rows, v.render(), -1, -1).describe(0.0, 0.0, cols.to_float(), rows.to_float(), 3000))
         return
     if flags.contains("--print")
         for row in widgets.text_rows(v.render(), cols, rows)
