@@ -437,7 +437,7 @@ fn window(mut v Viewer)
         widgets.draw_runs(mut w, v.render())
         w.present()
         match w.next_event()
-            Key(key, ctrl, _, shift) => v.on_key(key, ctrl, shift)
+            Key(key, ctrl, _, shift) => v.on_key(key_name(key), ctrl, shift)
             Resize(c, r) =>
                 v.cols = c
                 v.rows = r
@@ -446,6 +446,14 @@ fn window(mut v Viewer)
             Scroll(n) => v.scroll(-n * 3)
             Mouse(_, _, _, _) => continue
     w.close()
+
+## The `on_key` name of a window key (std.ui.7): `KeyCode.name`, except
+## that a typed space keeps the name `space` the `--keys` flag uses.
+fn key_name(key ui.KeyCode) str
+    n := key.name()
+    if n == " "
+        return "space"
+    n
 
 fn sample() Viewer
     p1 := reader.text_page(1, ["Searching a PDF without", "OCR is easy."])
