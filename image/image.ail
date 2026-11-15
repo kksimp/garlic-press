@@ -18,11 +18,11 @@ pub fn Gray.new(width int, height int, value int) Gray
     Gray(width: width, height: height, px: [value for _ in 0..width * height])
 
 pub fn Gray.at(self, x int, y int) int
-    px[y * width + x]
+    self.px[y * self.width + x]
 
 ## Inverts every pixel, for a `/Decode [1 0]` image.
 pub fn Gray.inverted(self) Gray
-    Gray(width: width, height: height, px: [255 - p for p in px])
+    Gray(width: self.width, height: self.height, px: [255 - p for p in self.px])
 
 ## The grey value of samples: `comps` 1 (grey), 3 (RGB) or 4 (CMYK), each
 ## `bpc` bits, rows padded to a byte.
@@ -157,27 +157,27 @@ struct FaxBits
 
 ## The next `n` bits (at most 16), zeros past the end.
 fn FaxBits.peek(self, n int) int
-    i := pos / 8
-    a := if i < data.len() then data[i] else 0
-    b := if i + 1 < data.len() then data[i + 1] else 0
-    c := if i + 2 < data.len() then data[i + 2] else 0
-    (a * 65536 + b * 256 + c).shr(24 - n - pos % 8).bit_and(1.shl(n) - 1)
+    i := self.pos / 8
+    a := if i < self.data.len() then self.data[i] else 0
+    b := if i + 1 < self.data.len() then self.data[i + 1] else 0
+    c := if i + 2 < self.data.len() then self.data[i + 2] else 0
+    (a * 65536 + b * 256 + c).shr(24 - n - self.pos % 8).bit_and(1.shl(n) - 1)
 
 fn FaxBits.done(self) bool
-    pos >= data.len() * 8
+    self.pos >= self.data.len() * 8
 
 fn FaxBits.code(mut self, table List[int], bits int) int ! ImageError
-    e := table[peek(bits)]
+    e := table[self.peek(bits)]
     if e == 0
-        return Bad(why: "no fax code at bit {pos}")
-    pos += e % 32
+        return Bad(why: "no fax code at bit {self.pos}")
+    self.pos += e % 32
     e / 32
 
 ## A run of one colour: make-up codes, then a terminating code.
 fn FaxBits.run(mut self, black bool) int ! ImageError
     mut total := 0
     while true
-        v := code(if black then BLACK_LUT else WHITE_LUT, 13)?
+        v := self.code(if black then BLACK_LUT else WHITE_LUT, 13)?
         if v == 4095
             return Bad(why: "end of line inside a run")
         total += v
@@ -186,8 +186,8 @@ fn FaxBits.run(mut self, black bool) int ! ImageError
 
 ## Skips an end-of-line code (eleven 0s and a 1) if one is next.
 fn FaxBits.eol(mut self) bool
-    if peek(12) == 1
-        pos += 12
+    if self.peek(12) == 1
+        self.pos += 12
         return true
     false
 
@@ -300,8 +300,8 @@ fn row_2d(mut b FaxBits, refl List[int], cols int) List[int] ! ImageError
 
 ## A PGM (P5) file of the image, for looking at what a decoder produced.
 pub fn Gray.pgm(self) List[int]
-    mut out := [c.code() for c in "P5\n{width} {height}\n255\n".chars()]
-    out.extend(px)
+    mut out := [c.code() for c in "P5\n{self.width} {self.height}\n255\n".chars()]
+    out.extend(self.px)
     out
 
 @test fn fax_tables_are_prefix_free()

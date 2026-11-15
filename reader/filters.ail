@@ -2,9 +2,11 @@
 ## `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`) carry pixels, not text, so
 ## they are not needed for the text layer and fail as unsupported.
 
+use std.compress
+
 pub fn decode_filter(name str, data List[int], parms Map[str, Obj]) List[int] ! PdfError
     match name
-        "FlateDecode" | "Fl" => predict(inflate_zlib(data)?, parms)
+        "FlateDecode" | "Fl" => predict(flate(data)?, parms)
         "LZWDecode" | "LZW" => predict(
             lzw(data, (parms.get("EarlyChange")?.as_int() else 1) == 1),
             parms,
@@ -14,6 +16,14 @@ pub fn decode_filter(name str, data List[int], parms Map[str, Obj]) List[int] ! 
         "RunLengthDecode" | "RL" => run_length(data)
         "Crypt" => data
         _ => Unsupported(what: "the {name} filter")
+
+## FlateDecode (7.4.4): std.compress first, and on any error the in-house
+## `inflate_zlib`, which keeps what decoded before damage and skips the
+## Adler-32 check, as truncated or misflagged real-world streams need.
+fn flate(data List[int]) List[int] ! PdfError
+    raw := compress.unzlib(bytes.from_list([v.to_u8() for v in data])) else
+        return inflate_zlib(data)
+    [v.to_int() for v in raw.to_list()]
 
 ## PNG and TIFF predictors after Flate or LZW (7.4.4.4).
 fn predict(data List[int], parms Map[str, Obj]) List[int] ! PdfError
@@ -188,3 +198,29 @@ fn run_length(data List[int]) List[int]
     rows := [2, 1, 2, 2, 1, 1]
     p := {"Predictor": Obj.Int(n: 12), "Columns": Obj.Int(n: 2)}
     assert_eq(predict(rows, p)?, [1, 2, 2, 3])
+
+@test fn flate_agrees_with_the_in_house_inflater() !
+    # zlib streams: "hello" stored and fixed, a back reference, and std's own output.
+    long := ascii("The office tracks every invoice. ".repeat(40))
+    own := [v.to_int() for v in compress.zlib(bytes.from_list([v.to_u8() for v in long])).to_list()]
+    fixtures := [
+        [120, 1, 1, 5, 0, 250, 255, 104, 101, 108, 108, 111, 6, 44, 2, 21],
+        [120, 156, 203, 72, 205, 201, 201, 7, 0, 6, 44, 2, 21],
+        [120, 218, 75, 76, 74, 78, 68, 69, 0, 65, 124, 6, 229],
+        own,
+    ]
+    for z in fixtures
+        std := [
+            v.to_int()
+            for v in compress.unzlib(bytes.from_list([v.to_u8() for v in z]))?.to_list()
+        ]
+        assert_eq(std, inflate_zlib(z)?)
+        assert_eq(decode_filter("FlateDecode", z, {})?, std)
+    assert_eq(decode_filter("Fl", own, {})?, long)
+
+@test fn flate_falls_back_on_a_bad_checksum() !
+    # "hello" at level 6 with the last Adler-32 byte changed (21 -> 22).
+    bad := [120, 156, 203, 72, 205, 201, 201, 7, 0, 6, 44, 2, 22]
+    strict := compress.unzlib(bytes.from_list([v.to_u8() for v in bad])) else b""
+    assert_eq(strict.len(), 0)
+    assert_eq(latin1(decode_filter("FlateDecode", bad, {})?), "hello")

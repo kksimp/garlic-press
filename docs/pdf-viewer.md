@@ -36,7 +36,7 @@ tools/pdf/
   pdf.ail            CLI: text, grep, json, info, outline, bench, view, images, layout, train
   reader/            the reader module (no effects except read_file)
     source.ail       bytes (List[int]) and PdfError; read_file (fs.read_bytes)
-    inflate.ail      RFC 1950/1951 inflate (stopgap)
+    inflate.ail      RFC 1950/1951 inflate (fallback for damaged Flate)
     lex.ail          tokens and objects (7.2-7.3)
     doc.ail          xref tables and streams, object streams, repair, pages (7.5, 7.7)
     filters.ail      Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG/TIFF predictors (7.4)
@@ -175,7 +175,7 @@ the rest comes from; `pdf bench FILE` tracks it. The source is 3,249 lines,
 | Need | Today | Replaced by |
 |---|---|---|
 | Binary file reads | done: `fs.read_bytes` (lane 123); the `od` stopgap is gone (19 ms to 4 ms on the report) | |
-| Flate | `inflate_zlib` in AIL, behind one function | `std.compress.unzlib` once it returns `bytes` (lane 128 returns `str` today, which fails on binary streams) |
+| Flate | done: `std.compress.unzlib`, falling back to `inflate_zlib` on any error (truncated streams, bad Adler-32) | |
 | Byte strings | `List[int]` | `bytes` (lane 123) |
 | Regex search | plain substring | `std.regex` (lane 127, merged) as `pdf grep --regex` |
 
@@ -218,9 +218,8 @@ the same page model, so search hits and agent queries keep working on it.
 
 ## Next slices
 
-1. Swap `inflate_zlib` for `std.compress` once it returns `bytes`; read pages
-   on several cores (a `par` comprehension needs the object cache out of the
-   page reader's `ref`).
+1. Read pages on several cores (a `par` comprehension needs the object cache
+   out of the page reader's `ref`).
 2. Decryption with an empty user password (RC4, AES-128, AES-256).
 3. `--regex` through `std.regex`; MacRoman; predefined CJK CMaps.
 4. Tagged-PDF reading order; form fields and annotation text.

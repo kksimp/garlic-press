@@ -167,7 +167,7 @@ fn Doc.dest_page(self, dest Obj, nums Map[int, int], depth int) int?
                 return i + 1
         return none
     if dd := d.as_dict()
-        return dest_page(dd.get("D") else Obj.Null, nums, depth + 1)
+        return self.dest_page(dd.get("D") else Obj.Null, nums, depth + 1)
     mut name := ""
     if n := d.as_name()
         name = n
@@ -178,11 +178,11 @@ fn Doc.dest_page(self, dest Obj, nums Map[int, int], depth int) int?
     root := key(trailer, "Root").as_dict() else return none
     if old := key(root, "Dests").as_dict()
         if v := old.get(name)
-            return dest_page(v, nums, depth + 1)
+            return self.dest_page(v, nums, depth + 1)
     names := key(root, "Names").as_dict() else return none
     tree := key(names, "Dests")
-    v := name_tree(tree, name, 0) else return none
-    dest_page(v, nums, depth + 1)
+    v := self.name_tree(tree, name, 0) else return none
+    self.dest_page(v, nums, depth + 1)
 
 fn Doc.name_tree(self, node Obj, name str, depth int) Obj?
     if depth > 32
@@ -195,7 +195,7 @@ fn Doc.name_tree(self, node Obj, name str, depth int) Obj?
                 return ns[i + 1]
             i += 2
     for kid in key(d, "Kids").as_arr() else []
-        if v := name_tree(kid, name, depth + 1)
+        if v := self.name_tree(kid, name, depth + 1)
             return v
     none
 
@@ -214,7 +214,7 @@ fn Doc.links(self, page Map[str, Obj], nums Map[int, int], dx float, dy float) L
             x1: r2(r[0].max(r[2]) - dx),
             y1: r2(r[1].max(r[3]) - dy),
         )
-        out.push(Link(rect: rect, uri: link_uri(d), page: target_page(d, nums)))
+        out.push(Link(rect: rect, uri: self.link_uri(d), page: self.target_page(d, nums)))
     out
 
 fn Doc.link_uri(self, d Map[str, Obj]) str?
@@ -226,11 +226,11 @@ fn Doc.link_uri(self, d Map[str, Obj]) str?
 ## The page a link or outline item goes to: `/Dest`, or a `GoTo` action.
 fn Doc.target_page(self, d Map[str, Obj], nums Map[int, int]) int?
     if dest := d.get("Dest")
-        return dest_page(dest, nums, 0)
+        return self.dest_page(dest, nums, 0)
     act := key(d, "A").as_dict() else return none
     if key(act, "S").as_name() != "GoTo"
         return none
-    dest_page(act.get("D") else Obj.Null, nums, 0)
+    self.dest_page(act.get("D") else Obj.Null, nums, 0)
 
 ## The document outline (bookmarks), depth first (12.3.3).
 pub fn Doc.outline(self) List[OutlineItem]
@@ -238,9 +238,9 @@ pub fn Doc.outline(self) List[OutlineItem]
     root := key(trailer, "Root").as_dict() else return out
     ol := key(root, "Outlines").as_dict() else return out
     pages := pages() else []
-    nums := page_numbers(pages)
+    nums := self.page_numbers(pages)
     mut seen := Set[int]()
-    outline_items(ol.get("First") else Obj.Null, 0, nums, mut out, mut seen)
+    self.outline_items(ol.get("First") else Obj.Null, 0, nums, mut out, mut seen)
     out
 
 fn Doc.outline_items(
@@ -258,14 +258,14 @@ fn Doc.outline_items(
             return
         d := resolve(node).as_dict() else return
         title := text_string(key(d, "Title").as_bytes() else [])
-        out.push(OutlineItem(title: title, depth: depth, page: target_page(d, nums)))
+        out.push(OutlineItem(title: title, depth: depth, page: self.target_page(d, nums)))
         if kid := d.get("First")
-            outline_items(kid, depth + 1, nums, mut out, mut seen)
+            self.outline_items(kid, depth + 1, nums, mut out, mut seen)
         node = d.get("Next") else return
 
 ## Every page, read (1-based numbers). A page that fails to read is empty.
 pub fn Doc.read_pages(self) List[Page] ! PdfError
-    ps := lazy_pages()?
+    ps := self.lazy_pages()?
     [ps.get(i) for i in 0..ps.count()]
 
 struct PageCache
@@ -282,22 +282,22 @@ pub struct Pages
 
 pub fn Doc.lazy_pages(self) Pages ! PdfError
     dicts := pages()?
-    Pages(doc: self, dicts: dicts, nums: page_numbers(dicts), cache: ref PageCache(pages: {}))
+    Pages(doc: self, dicts: dicts, nums: self.page_numbers(dicts), cache: ref PageCache(pages: {}))
 
 pub fn Pages.count(self) int
-    dicts.len()
+    self.dicts.len()
 
 ## Page `i` (0-based), read once.
 pub fn Pages.get(self, i int) Page
-    if p := cache.pages.get(i)
+    if p := self.cache.pages.get(i)
         return p
-    p := doc.read_page(dicts[i], i + 1, nums)
-    cache.pages[i] = p
+    p := self.doc.read_page(self.dicts[i], i + 1, self.nums)
+    self.cache.pages[i] = p
     p
 
 ## Replaces page `i` in the cache, as OCR does once it has read it.
 pub fn Pages.put(self, i int, p Page)
-    cache.pages[i] = p
+    self.cache.pages[i] = p
 
 ## Pages already read, for tests and tools that build pages themselves.
 pub fn pages_of(list List[Page]) Pages
@@ -314,11 +314,11 @@ pub fn pages_of(list List[Page]) Pages
 
 ## How many pages have been read so far.
 pub fn Pages.read_count(self) int
-    cache.pages.len()
+    self.cache.pages.len()
 
 ## Whether page `i` has been read.
 pub fn Pages.is_read(self, i int) bool
-    cache.pages.contains(i)
+    self.cache.pages.contains(i)
 
 ## A line in page coordinates: from the crop box's lower left corner.
 fn shift(l Line, dx float, dy float) Line
@@ -353,7 +353,7 @@ pub fn Doc.read_page(self, p Map[str, Obj], number int, nums Map[int, int]) Page
         height: r2((box[3] - box[1]).abs()),
         rotate: key(p, "Rotate").as_int() else 0,
         lines: tl,
-        links: links(p, nums, box[0], box[1]),
+        links: self.links(p, nums, box[0], box[1]),
         images: pt.images,
         unreadable: unreadable,
         image_only: pt.images > 0 and pt.glyphs.len() == 0,

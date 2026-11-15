@@ -20,10 +20,10 @@ pub struct Blob
     pub runs List[Run]
 
 pub fn Blob.w(self) int
-    x1 - x0
+    self.x1 - self.x0
 
 pub fn Blob.h(self) int
-    y1 - y0
+    self.y1 - self.y0
 
 ## A line of glyphs, left to right; `base` is the baseline row and `size`
 ## the height from it to the tops of tall letters. `words` holds the glyph
