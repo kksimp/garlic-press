@@ -147,62 +147,62 @@ fn overlaps(spans List[List[int]], a int, b int) bool
     false
 
 fn Viewer.layout_of(mut self, i int) Layout
-    if l := layouts.get(i)
+    if l := self.layouts.get(i)
         return l
-    l := layout(reader_ocr.page(pages, i), cols - 2)
-    layouts[i] = l
+    l := layout(self.reader_ocr.page(self.pages, i), self.cols - 2)
+    self.layouts[i] = l
     l
 
 ## Rows the page area has: the window less the title and status rows.
 fn Viewer.body_rows(self) int
-    (rows - 2).max(1)
+    (self.rows - 2).max(1)
 
 ## Searches for `q` from the current page on, reading pages only until
 ## one has a match (ADR 0511).
 pub fn Viewer.find(mut self, q str)
-    query = q
-    hits = []
-    hit = -1
-    if not seek(page, 1, false)
-        message = "no match for \"{q}\""
+    self.query = q
+    self.hits = []
+    self.hit = -1
+    if not self.seek(self.page, 1, false)
+        self.message = "no match for \"{q}\""
 
 ## The first page with a match from page `from`, stepping `dir` and
 ## wrapping; its matches become `hits`, and the first (or with `last`, the
 ## last) is current.
 fn Viewer.seek(mut self, from int, dir int, last bool) bool
-    n := pages.count()
+    n := self.pages.count()
     for k in 0..n
         i := ((from + dir * k) % n + n) % n
-        hs := reader.search_page(reader_ocr.page(pages, i), query, false)
+        hs := reader.search_page(self.reader_ocr.page(self.pages, i), self.query, false)
         if hs.len() > 0
-            hits = hs
-            go_hit(if last then hs.len() - 1 else 0)
+            self.hits = hs
+            self.go_hit(if last then hs.len() - 1 else 0)
             return true
     false
 
 ## The next (`dir` 1) or previous (-1) match, moving to the next page with
 ## one when this page's run out.
 fn Viewer.step_hit(mut self, dir int)
-    if query == ""
+    if self.query == ""
         return
-    if hits.len() == 0
-        find(query)
+    if self.hits.len() == 0
+        self.find(self.query)
         return
-    j := hit + dir
-    if j >= 0 and j < hits.len()
-        go_hit(j)
+    j := self.hit + dir
+    if j >= 0 and j < self.hits.len()
+        self.go_hit(j)
         return
-    seek(hits[0].page - 1 + dir, dir, dir < 0)
+    self.seek(self.hits[0].page - 1 + dir, dir, dir < 0)
 
 fn Viewer.go_hit(mut self, i int)
-    hit = i
-    h := hits[hit]
-    page = h.page - 1
-    l := layout_of(page)
+    self.hit = i
+    h := self.hits[self.hit]
+    self.page = h.page - 1
+    l := self.layout_of(self.page)
     r := row_of(l, h.line)
-    if r < top or r >= top + body_rows()
-        top = (r - body_rows() / 3).max(0)
-    message = "match {hit + 1} of {hits.len()} on page {page + 1}"
+    if r < self.top or r >= self.top + self.body_rows()
+        self.top = (r - self.body_rows() / 3).max(0)
+    self.message = "match {self.hit + 1} of {self.hits.len()} on page {self.page + 1}"
 
 fn row_of(l Layout, line int) int
     for r in 0..l.cells.len()
@@ -212,84 +212,84 @@ fn row_of(l Layout, line int) int
     0
 
 fn Viewer.go_page(mut self, n int)
-    page = n.max(0).min(pages.count() - 1)
-    top = 0
+    self.page = n.max(0).min(self.pages.count() - 1)
+    self.top = 0
 
 ## One key, as the window sends it (std.ui.4): `key` is a name such as
 ## "a", "enter" or "pagedown".
 pub fn Viewer.on_key(mut self, key str, ctrl bool, shift bool)
-    message = ""
-    if typing
+    self.message = ""
+    if self.typing
         if key == "enter"
-            typing = false
-            find(query)
+            self.typing = false
+            self.find(self.query)
         elif key == "escape"
-            typing = false
+            self.typing = false
         elif key == "backspace"
-            cs := query.chars()
-            query = cs[..(cs.len() - 1).max(0)].join("")
+            cs := self.query.chars()
+            self.query = cs[..(cs.len() - 1).max(0)].join("")
         elif key == "space"
-            query = "{query} "
+            self.query = "{self.query} "
         elif key.chars().len() == 1 and not ctrl
-            query = "{query}{if shift then key.to_upper() else key}"
+            self.query = "{self.query}{if shift then key.to_upper() else key}"
         return
-    l := layout_of(page)
+    l := self.layout_of(self.page)
     if key == "q" or key == "escape"
-        quit = true
+        self.quit = true
     elif key == "/" or (ctrl and key == "f")
-        typing = true
-        query = ""
+        self.typing = true
+        self.query = ""
     elif key == "n" and not shift
-        step_hit(1)
+        self.step_hit(1)
     elif key == "n" and shift
-        step_hit(-1)
+        self.step_hit(-1)
     elif key == "pagedown" or key == "space"
-        go_page(page + 1)
+        self.go_page(self.page + 1)
     elif key == "pageup" or key == "backspace"
-        go_page(page - 1)
+        self.go_page(self.page - 1)
     elif key == "down" or key == "j"
-        top = (top + 1).min((l.rows.len() - 1).max(0))
+        self.top = (self.top + 1).min((l.rows.len() - 1).max(0))
     elif key == "up" or key == "k"
-        top = (top - 1).max(0)
+        self.top = (self.top - 1).max(0)
     elif key == "home"
-        go_page(0)
+        self.go_page(0)
     elif key == "end"
-        go_page(pages.count() - 1)
+        self.go_page(self.pages.count() - 1)
 
 ## Scroll by `n` rows, from the mouse wheel.
 pub fn Viewer.scroll(mut self, n int)
-    l := layout_of(page)
-    top = (top + n).max(0).min((l.rows.len() - 1).max(0))
+    l := self.layout_of(self.page)
+    self.top = (self.top + n).max(0).min((l.rows.len() - 1).max(0))
 
 ## Whether page `pi`'s character `ci` of line `li` is in a hit; 2 for the
 ## current hit.
 fn Viewer.hit_at(self, pi int, li int, ci int) int
-    for i in 0..hits.len()
-        h := hits[i]
+    for i in 0..self.hits.len()
+        h := self.hits[i]
         if h.page - 1 != pi
             continue
         for s in h.spans
             if s[0] == li and ci >= s[1] and ci < s[2]
-                return if i == hit then 2 else 1
+                return if i == self.hit then 2 else 1
     0
 
 ## The screen as runs: a title bar, the page on paper, and a status bar.
 pub fn Viewer.render(mut self) List[widgets.Run]
     mut runs := List[widgets.Run]()
-    l := layout_of(page)
-    pm := reader_ocr.page(pages, page).model
-    title := " {base(path)}  page {page + 1}/{pages.count()}"
+    l := self.layout_of(self.page)
+    pm := self.reader_ocr.page(self.pages, self.page).model
+    title := " {base(self.path)}  page {self.page + 1}/{self.pages.count()}"
     mut note := if pm.image_only then "  image-only page: a scan, no text without OCR" else ""
     if pm.ocr
         note = "  scan, read by OCR"
-    runs.push(bar(0, "{title}{note}", cols))
-    body := body_rows()
-    left := ((cols - l.width) / 2).max(0)
+    runs.push(bar(0, "{title}{note}", self.cols))
+    body := self.body_rows()
+    left := ((self.cols - l.width) / 2).max(0)
     for r in 0..body
         runs.push(widgets.Run(
             col: 0,
             row: r + 1,
-            text: " ".repeat(cols),
+            text: " ".repeat(self.cols),
             fg: PAPER_FG,
             bg: EDGE_BG,
             bold: false,
@@ -297,12 +297,12 @@ pub fn Viewer.render(mut self) List[widgets.Run]
         runs.push(widgets.Run(
             col: left,
             row: r + 1,
-            text: " ".repeat(l.width.min(cols)),
+            text: " ".repeat(l.width.min(self.cols)),
             fg: PAPER_FG,
             bg: PAPER_BG,
             bold: false,
         ))
-        src := top + r
+        src := self.top + r
         if src >= l.rows.len()
             continue
         text := l.rows[src]
@@ -310,7 +310,7 @@ pub fn Viewer.render(mut self) List[widgets.Run]
         runs.push(widgets.Run(
             col: left,
             row: r + 1,
-            text: widgets.fit(text, l.width.min(cols - left)),
+            text: widgets.fit(text, l.width.min(self.cols - left)),
             fg: fg,
             bg: PAPER_BG,
             bold: false,
@@ -319,7 +319,7 @@ pub fn Viewer.render(mut self) List[widgets.Run]
         cl := l.cells[src]
         for c in 0..cs.len()
             if c < cl.len() and cl[c][0] >= 0
-                k := hit_at(page, cl[c][0], cl[c][1])
+                k := self.hit_at(self.page, cl[c][0], cl[c][1])
                 if k > 0
                     runs.push(widgets.Run(
                         col: left + c,
@@ -330,8 +330,9 @@ pub fn Viewer.render(mut self) List[widgets.Run]
                         bold: false,
                     ))
     help := " / find   n N next/previous match   PgDn PgUp page   up down scroll   q quit"
-    status := if typing then " find: {query}_" else if message != "" then " {message}" else help
-    runs.push(bar(rows - 1, status, cols))
+    status := if self.typing then " find: {self.query}_" else if self.message
+        != "" then " {self.message}" else help
+    runs.push(bar(self.rows - 1, status, self.cols))
     runs
 
 fn bar(row int, text str, cols int) widgets.Run
@@ -351,30 +352,30 @@ fn base(path str) str
 ## What is on screen, for an agent: the page, the scroll, the query and
 ## its hits, and the visible text rows.
 pub fn Viewer.state_json(mut self) Json
-    l := layout_of(page)
-    pm := reader_ocr.page(pages, page).model
-    shown := [l.rows[i] for i in top..(top + body_rows()).min(l.rows.len())]
+    l := self.layout_of(self.page)
+    pm := self.reader_ocr.page(self.pages, self.page).model
+    shown := [l.rows[i] for i in self.top..(self.top + self.body_rows()).min(l.rows.len())]
     mut m := List[JsonMember]()
     m.push(JsonMember(key: "file", value: Json.Str(path)))
-    m.push(JsonMember(key: "page", value: Json.Num((page + 1).to_float())))
-    m.push(JsonMember(key: "pages", value: Json.Num(pages.count().to_float())))
-    m.push(JsonMember(key: "top_row", value: Json.Num(top.to_float())))
+    m.push(JsonMember(key: "page", value: Json.Num((self.page + 1).to_float())))
+    m.push(JsonMember(key: "pages", value: Json.Num(self.pages.count().to_float())))
+    m.push(JsonMember(key: "top_row", value: Json.Num(self.top.to_float())))
     m.push(JsonMember(key: "query", value: Json.Str(query)))
-    m.push(JsonMember(key: "hit", value: Json.Num((hit + 1).to_float())))
-    m.push(JsonMember(key: "hits", value: Json.Arr([h.to_json() for h in hits])))
+    m.push(JsonMember(key: "hit", value: Json.Num((self.hit + 1).to_float())))
+    m.push(JsonMember(key: "hits", value: Json.Arr([h.to_json() for h in self.hits])))
     m.push(JsonMember(key: "screen", value: Json.Arr([Json.Str(s) for s in shown])))
     m.push(JsonMember(key: "visible", value: Json.Arr([
         pm.lines[i].to_json()
-        for i in visible_lines(l)
+        for i in self.visible_lines(l)
     ])))
-    m.push(JsonMember(key: "pages_read", value: Json.Num(pages.read_count().to_float())))
+    m.push(JsonMember(key: "pages_read", value: Json.Num(self.pages.read_count().to_float())))
     Json.Obj(m)
 
 ## The page's lines with a character on screen, in page order: the words a
 ## person sees right now, with their positions on the page.
 fn Viewer.visible_lines(self, l Layout) List[int]
     mut seen := Set[int]()
-    for r in top..(top + body_rows()).min(l.cells.len())
+    for r in self.top..(self.top + self.body_rows()).min(l.cells.len())
         for c in l.cells[r]
             if c[0] >= 0
                 seen.add(c[0])

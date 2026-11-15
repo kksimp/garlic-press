@@ -103,51 +103,53 @@ fn hex_val(c int) int
     -1
 
 pub fn Lexer.at_end(self) bool
-    pos >= buf.len()
+    self.pos >= self.buf.len()
 
 ## Skips whitespace and `%` comments (7.2.3, 7.2.4).
 pub fn Lexer.skip_ws(mut self)
-    while pos < buf.len()
-        c := buf[pos]
+    while self.pos < self.buf.len()
+        c := self.buf[self.pos]
         if c == 37
-            while pos < buf.len() and buf[pos] != 10 and buf[pos] != 13
-                pos += 1
+            while self.pos < self.buf.len()
+                and self.buf[self.pos] != 10
+                and self.buf[self.pos] != 13
+                self.pos += 1
         elif is_white(c)
-            pos += 1
+            self.pos += 1
         else
             return
 
 ## The next token, or `none` at the end. Arrays and dictionaries come out as
 ## `Op("[")`, `Op("]")`, `Op("<<")` and `Op(">>")`.
 pub fn Lexer.token(mut self) Obj?
-    skip_ws()
-    if pos >= buf.len()
+    self.skip_ws()
+    if self.pos >= self.buf.len()
         return none
-    c := buf[pos]
+    c := self.buf[self.pos]
     if c == 47
-        return name()
+        return self.name()
     if c == 40
-        return literal()
+        return self.literal()
     if c == 60
-        if pos + 1 < buf.len() and buf[pos + 1] == 60
-            pos += 2
+        if self.pos + 1 < self.buf.len() and self.buf[self.pos + 1] == 60
+            self.pos += 2
             return Obj.Op(s: "<<")
-        return hex_string()
+        return self.hex_string()
     if c == 62
-        if pos + 1 < buf.len() and buf[pos + 1] == 62
-            pos += 2
+        if self.pos + 1 < self.buf.len() and self.buf[self.pos + 1] == 62
+            self.pos += 2
             return Obj.Op(s: ">>")
-        pos += 1
+        self.pos += 1
         return Obj.Op(s: ">")
     if c == 91 or c == 93 or c == 123 or c == 125 or c == 41
-        pos += 1
+        self.pos += 1
         return Obj.Op(s: chr(c).to_str())
     if (c >= 48 and c <= 57) or c == 43 or c == 45 or c == 46
-        return number()
-    start := pos
-    while pos < buf.len() and is_regular(buf[pos])
-        pos += 1
-    word := source_text(buf, start, pos)
+        return self.number()
+    start := self.pos
+    while self.pos < self.buf.len() and is_regular(self.buf[self.pos])
+        self.pos += 1
+    word := source_text(self.buf, start, self.pos)
     match word
         "true" => Obj.Bool(b: true)
         "false" => Obj.Bool(b: false)
@@ -159,34 +161,34 @@ fn source_text(buf List[int], a int, b int) str
 
 ## A name, with `#xx` escapes (7.3.5).
 fn Lexer.name(mut self) Obj
-    pos += 1
+    self.pos += 1
     mut out := List[char]()
-    while pos < buf.len() and is_regular(buf[pos])
-        c := buf[pos]
+    while self.pos < self.buf.len() and is_regular(self.buf[self.pos])
+        c := self.buf[self.pos]
         if c == 35
-            and pos + 2 < buf.len()
-            and hex_val(buf[pos + 1]) >= 0
-            and hex_val(buf[pos + 2]) >= 0
-            out.push(chr(hex_val(buf[pos + 1]) * 16 + hex_val(buf[pos + 2])))
-            pos += 3
+            and self.pos + 2 < self.buf.len()
+            and hex_val(self.buf[self.pos + 1]) >= 0
+            and hex_val(self.buf[self.pos + 2]) >= 0
+            out.push(chr(hex_val(self.buf[self.pos + 1]) * 16 + hex_val(self.buf[self.pos + 2])))
+            self.pos += 3
         else
             out.push(chr(c))
-            pos += 1
+            self.pos += 1
     Obj.Name(s: out.join(""))
 
 ## A number: an integer, or a real with a `.` (7.3.3).
 fn Lexer.number(mut self) Obj
     mut neg := false
-    if buf[pos] == 43 or buf[pos] == 45
-        neg = buf[pos] == 45
-        pos += 1
+    if self.buf[self.pos] == 43 or self.buf[self.pos] == 45
+        neg = self.buf[self.pos] == 45
+        self.pos += 1
     mut n := 0
     mut frac := 0.0
     mut scale := 1.0
     mut real := false
     mut digits := 0
-    while pos < buf.len()
-        c := buf[pos]
+    while self.pos < self.buf.len()
+        c := self.buf[self.pos]
         if c >= 48 and c <= 57
             if real
                 scale = scale / 10.0
@@ -198,7 +200,7 @@ fn Lexer.number(mut self) Obj
             real = true
         else
             break
-        pos += 1
+        self.pos += 1
     if real
         x := n.to_float() + frac
         return Obj.Real(x: if neg then -x else x)
@@ -206,17 +208,17 @@ fn Lexer.number(mut self) Obj
 
 ## A literal string, with nested parentheses and escapes (7.3.4.2).
 fn Lexer.literal(mut self) Obj
-    pos += 1
+    self.pos += 1
     mut out := List[int]()
     mut depth := 1
-    while pos < buf.len()
-        c := buf[pos]
-        pos += 1
+    while self.pos < self.buf.len()
+        c := self.buf[self.pos]
+        self.pos += 1
         if c == 92
-            if pos >= buf.len()
+            if self.pos >= self.buf.len()
                 break
-            e := buf[pos]
-            pos += 1
+            e := self.buf[self.pos]
+            self.pos += 1
             if e == 110
                 out.push(10)
             elif e == 114
@@ -230,14 +232,17 @@ fn Lexer.literal(mut self) Obj
             elif e >= 48 and e <= 55
                 mut v := e - 48
                 mut k := 1
-                while k < 3 and pos < buf.len() and buf[pos] >= 48 and buf[pos] <= 55
-                    v = v * 8 + buf[pos] - 48
-                    pos += 1
+                while k < 3
+                    and self.pos < self.buf.len()
+                    and self.buf[self.pos] >= 48
+                    and self.buf[self.pos] <= 55
+                    v = v * 8 + self.buf[self.pos] - 48
+                    self.pos += 1
                     k += 1
                 out.push(v.bit_and(255))
             elif e == 13
-                if pos < buf.len() and buf[pos] == 10
-                    pos += 1
+                if self.pos < self.buf.len() and self.buf[self.pos] == 10
+                    self.pos += 1
             elif e == 10
                 continue
             else
@@ -253,20 +258,20 @@ fn Lexer.literal(mut self) Obj
         elif c == 13
             # An end of line in a string is a line feed (7.3.4.2).
             out.push(10)
-            if pos < buf.len() and buf[pos] == 10
-                pos += 1
+            if self.pos < self.buf.len() and self.buf[self.pos] == 10
+                self.pos += 1
         else
             out.push(c)
     Obj.Str(data: out)
 
 ## A hexadecimal string; an odd last digit is followed by 0 (7.3.4.3).
 fn Lexer.hex_string(mut self) Obj
-    pos += 1
+    self.pos += 1
     mut out := List[int]()
     mut hi := -1
-    while pos < buf.len()
-        c := buf[pos]
-        pos += 1
+    while self.pos < self.buf.len()
+        c := self.buf[self.pos]
+        self.pos += 1
         if c == 62
             break
         v := hex_val(c)
@@ -285,46 +290,48 @@ fn Lexer.hex_string(mut self) Obj
 ## is an indirect reference (7.3.10). Content streams have no references,
 ## so they read with `refs` false.
 pub fn Lexer.object(mut self, refs bool) Obj ! PdfError
-    t := token() else return Bad(why: "unexpected end of data")
+    t := self.token() else return Bad(why: "unexpected end of data")
     match t
         Op(s) =>
             if s == "["
                 mut items := List[Obj]()
                 while true
-                    skip_ws()
-                    if pos < buf.len() and buf[pos] == 93
-                        pos += 1
+                    self.skip_ws()
+                    if self.pos < self.buf.len() and self.buf[self.pos] == 93
+                        self.pos += 1
                         break
-                    if pos >= buf.len()
+                    if self.pos >= self.buf.len()
                         return Bad(why: "unterminated array")
-                    items.push(object(refs)?)
+                    items.push(self.object(refs)?)
                 return Obj.Arr(items: items)
             if s == "<<"
                 mut d := Map[str, Obj]()
                 while true
-                    skip_ws()
-                    if pos + 1 < buf.len() and buf[pos] == 62 and buf[pos + 1] == 62
-                        pos += 2
+                    self.skip_ws()
+                    if self.pos + 1 < self.buf.len()
+                        and self.buf[self.pos] == 62
+                        and self.buf[self.pos + 1] == 62
+                        self.pos += 2
                         break
-                    if pos >= buf.len()
+                    if self.pos >= self.buf.len()
                         return Bad(why: "unterminated dictionary")
-                    k := token() else return Bad(why: "unterminated dictionary")
+                    k := self.token() else return Bad(why: "unterminated dictionary")
                     if key := k.as_name()
-                        d[key] = object(refs)?
+                        d[key] = self.object(refs)?
                 return Obj.Dict(d: d)
             t
         Int(n) =>
             if not refs
                 return t
-            save := pos
-            g := token() else return t
+            save := self.pos
+            g := self.token() else return t
             match g
                 Int(gen) =>
-                    if r := token()
+                    if r := self.token()
                         if r == Obj.Op(s: "R")
                             return Obj.Ref(num: n, gen: gen)
-                Null | Bool | Real | Str | Name | Arr | Dict | Ref | Stream | Op => pos = save
-            pos = save
+                Null | Bool | Real | Str | Name | Arr | Dict | Ref | Stream | Op => self.pos = save
+            self.pos = save
             t
         Null | Bool | Real | Str | Name | Arr | Dict | Ref | Stream => t
 

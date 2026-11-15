@@ -145,15 +145,15 @@ fn huff(lengths List[int]) Huff
     Huff(counts: counts, symbols: symbols)
 
 fn Bits.bits(mut self, n int) int ! PdfError
-    while cnt < n
-        if pos >= data.len()
+    while self.cnt < n
+        if self.pos >= self.data.len()
             return Bad(why: "deflate stream ends early")
-        buf = buf + data[pos].shl(cnt)
-        pos += 1
-        cnt += 8
-    v := buf.bit_and(1.shl(n) - 1)
-    buf = buf.shr(n)
-    cnt -= n
+        self.buf = self.buf + self.data[self.pos].shl(self.cnt)
+        self.pos += 1
+        self.cnt += 8
+    v := self.buf.bit_and(1.shl(n) - 1)
+    self.buf = self.buf.shr(n)
+    self.cnt -= n
     v
 
 fn Bits.decode(mut self, h Huff) int ! PdfError
@@ -161,7 +161,7 @@ fn Bits.decode(mut self, h Huff) int ! PdfError
     mut first := 0
     mut index := 0
     for l in 1..16
-        code += bits(1)?
+        code += self.bits(1)?
         count := h.counts[l]
         if code - count < first
             return h.symbols[index + code - first]
@@ -172,7 +172,7 @@ fn Bits.decode(mut self, h Huff) int ! PdfError
 
 fn Bits.codes(mut self, mut out List[int], lit Huff, dist Huff) ! PdfError
     while true
-        sym := decode(lit)?
+        sym := self.decode(lit)?
         if sym < 256
             out.push(sym)
         elif sym == 256
@@ -181,11 +181,11 @@ fn Bits.codes(mut self, mut out List[int], lit Huff, dist Huff) ! PdfError
             s := sym - 257
             if s >= 29
                 return Bad(why: "bad length code in deflate stream")
-            n := LEN_BASE[s] + bits(LEN_EXTRA[s])?
-            ds := decode(dist)?
+            n := LEN_BASE[s] + self.bits(LEN_EXTRA[s])?
+            ds := self.decode(dist)?
             if ds >= 30
                 return Bad(why: "bad distance code in deflate stream")
-            d := DIST_BASE[ds] + bits(DIST_EXTRA[ds])?
+            d := DIST_BASE[ds] + self.bits(DIST_EXTRA[ds])?
             if d > out.len()
                 return Bad(why: "deflate distance before the start")
             start := out.len() - d
@@ -193,16 +193,16 @@ fn Bits.codes(mut self, mut out List[int], lit Huff, dist Huff) ! PdfError
                 out.push(out[start + i])
 
 fn Bits.dynamic(mut self, mut out List[int]) ! PdfError
-    nlen := bits(5)? + 257
-    ndist := bits(5)? + 1
-    ncode := bits(4)? + 4
+    nlen := self.bits(5)? + 257
+    ndist := self.bits(5)? + 1
+    ncode := self.bits(4)? + 4
     mut cl := [0 for _ in 0..19]
     for i in 0..ncode
-        cl[CL_ORDER[i]] = bits(3)?
+        cl[CL_ORDER[i]] = self.bits(3)?
     ch := huff(cl)
     mut lengths := List[int]()
     while lengths.len() < nlen + ndist
-        sym := decode(ch)?
+        sym := self.decode(ch)?
         if sym < 16
             lengths.push(sym)
         else
@@ -211,16 +211,16 @@ fn Bits.dynamic(mut self, mut out List[int]) ! PdfError
             if sym == 16
                 prev := lengths.last() else return Bad(why: "deflate repeat with no previous length")
                 val = prev
-                rep = 3 + bits(2)?
+                rep = 3 + self.bits(2)?
             elif sym == 17
-                rep = 3 + bits(3)?
+                rep = 3 + self.bits(3)?
             else
-                rep = 11 + bits(7)?
+                rep = 11 + self.bits(7)?
             for _ in 0..rep
                 lengths.push(val)
     if lengths.len() > nlen + ndist
         return Bad(why: "deflate code lengths overrun")
-    codes(mut out, huff(lengths[..nlen]), huff(lengths[nlen..]))?
+    self.codes(mut out, huff(lengths[..nlen]), huff(lengths[nlen..]))?
 
 ## Inflates raw deflate data from `start` into `out` (RFC 1951 3.2.3).
 fn inflate_into(data List[int], start int, mut out List[int]) ! PdfError

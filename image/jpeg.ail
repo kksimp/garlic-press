@@ -107,51 +107,51 @@ fn huff_table(counts List[int], values List[int]) Huff
     Huff(lut: lut)
 
 fn JBits.fill(mut self)
-    while cnt <= 24
-        if marker or pos >= data.len()
-            buf = buf.shl(8).bit_and(0xffffffff)
-            cnt += 8
+    while self.cnt <= 24
+        if self.marker or self.pos >= self.data.len()
+            self.buf = self.buf.shl(8).bit_and(0xffffffff)
+            self.cnt += 8
             continue
-        c := data[pos]
+        c := self.data[self.pos]
         if c == 0xff
-            n := if pos + 1 < data.len() then data[pos + 1] else 0
+            n := if self.pos + 1 < self.data.len() then self.data[self.pos + 1] else 0
             if n == 0
-                pos += 2
+                self.pos += 2
             else
-                marker = true
+                self.marker = true
                 continue
         else
-            pos += 1
-        buf = buf.shl(8).bit_or(c).bit_and(0xffffffff)
-        cnt += 8
+            self.pos += 1
+        self.buf = self.buf.shl(8).bit_or(c).bit_and(0xffffffff)
+        self.cnt += 8
 
 fn JBits.bits(mut self, n int) int
     if n == 0
         return 0
-    if cnt < n
-        fill()
-    v := buf.shr(cnt - n).bit_and(1.shl(n) - 1)
-    cnt -= n
+    if self.cnt < n
+        self.fill()
+    v := self.buf.shr(self.cnt - n).bit_and(1.shl(n) - 1)
+    self.cnt -= n
     v
 
 fn JBits.decode(mut self, h Huff) int ! ImageError
-    if cnt < 16
-        fill()
-    e := h.lut[buf.shr(cnt - 16).bit_and(0xffff)]
+    if self.cnt < 16
+        self.fill()
+    e := h.lut[self.buf.shr(self.cnt - 16).bit_and(0xffff)]
     if e == 0
         return Bad(why: "bad Huffman code in JPEG data")
-    cnt -= e / 256
+    self.cnt -= e / 256
     e % 256
 
 ## Restarts after an RSTn marker: drop the bits left, step over the marker.
 fn JBits.restart(mut self)
-    buf = 0
-    cnt = 0
-    marker = false
-    while pos + 1 < data.len()
-        and not (data[pos] == 0xff and data[pos + 1] >= 0xd0 and data[pos + 1] <= 0xd7)
-        pos += 1
-    pos += 2
+    self.buf = 0
+    self.cnt = 0
+    self.marker = false
+    while self.pos + 1 < self.data.len()
+        and not (self.data[self.pos] == 0xff and self.data[self.pos + 1] >= 0xd0 and self.data[self.pos + 1] <= 0xd7)
+        self.pos += 1
+    self.pos += 2
 
 fn extend(v int, s int) int
     if s == 0
@@ -231,12 +231,12 @@ fn clamp(v float) int
 
 ## Decodes a Huffman symbol, or -1 for a code that is not in the table.
 fn JBits.symbol(mut self, h Huff) int
-    if cnt < 16
-        fill()
-    e := h.lut[buf.shr(cnt - 16).bit_and(0xffff)]
+    if self.cnt < 16
+        self.fill()
+    e := h.lut[self.buf.shr(self.cnt - 16).bit_and(0xffff)]
     if e == 0
         return -1
-    cnt -= e / 256
+    self.cnt -= e / 256
     e % 256
 
 ## A baseline or extended-sequential block: DC then all 63 AC coefficients.
@@ -651,40 +651,40 @@ fn frame(d List[int]) Frame ! ImageError
 ## positions (what libjpeg's "fancy upsampling" does for 2x), clamped at the
 ## edges.
 fn Frame.full(self, ci int, hmax int, vmax int) List[float]
-    c := comps[ci]
-    pw := strides[ci] * 8
+    c := self.comps[ci]
+    pw := self.strides[ci] * 8
     mut out := List[float]()
     if c.h == hmax and c.v == vmax
-        for y in 0..h
-            out.extend(planes[ci][y * pw..y * pw + w])
+        for y in 0..self.h
+            out.extend(self.planes[ci][y * pw..y * pw + self.w])
         return out
-    cw := (w * c.h + hmax - 1) / hmax
-    chh := (h * c.v + vmax - 1) / vmax
-    mut xa := [0 for _ in 0..w]
-    mut xb := [0 for _ in 0..w]
-    mut tx := [0.0 for _ in 0..w]
-    for x in 0..w
+    cw := (self.w * c.h + hmax - 1) / hmax
+    chh := (self.h * c.v + vmax - 1) / vmax
+    mut xa := [0 for _ in 0..self.w]
+    mut xb := [0 for _ in 0..self.w]
+    mut tx := [0.0 for _ in 0..self.w]
+    for x in 0..self.w
         fx := (x.to_float() + 0.5) * c.h.to_float() / hmax.to_float() - 0.5
         x0 := fx.floor().to_int()
         xa[x] = x0.max(0).min(cw - 1)
         xb[x] = (x0 + 1).max(0).min(cw - 1)
         tx[x] = fx - x0.to_float()
     # Each source row stretched to the image width.
-    mut wide := [0.0 for _ in 0..chh * w]
+    mut wide := [0.0 for _ in 0..chh * self.w]
     for sy in 0..chh
         base := sy * pw
-        for x in 0..w
-            wide[sy * w + x] = planes[ci][base + xa[x]] * (1.0 - tx[x])
-                + planes[ci][base + xb[x]] * tx[x]
-    out = [0.0 for _ in 0..w * h]
-    for y in 0..h
+        for x in 0..self.w
+            wide[sy * self.w + x] = self.planes[ci][base + xa[x]] * (1.0 - tx[x])
+                + self.planes[ci][base + xb[x]] * tx[x]
+    out = [0.0 for _ in 0..self.w * self.h]
+    for y in 0..self.h
         fy := (y.to_float() + 0.5) * c.v.to_float() / vmax.to_float() - 0.5
         y0 := fy.floor().to_int()
         ty := fy - y0.to_float()
-        ra := y0.max(0).min(chh - 1) * w
-        rb := (y0 + 1).max(0).min(chh - 1) * w
-        for x in 0..w
-            out[y * w + x] = wide[ra + x] * (1.0 - ty) + wide[rb + x] * ty
+        ra := y0.max(0).min(chh - 1) * self.w
+        rb := (y0 + 1).max(0).min(chh - 1) * self.w
+        for x in 0..self.w
+            out[y * self.w + x] = wide[ra + x] * (1.0 - ty) + wide[rb + x] * ty
     out
 
 ## Decodes a baseline, extended sequential or progressive Huffman JPEG to

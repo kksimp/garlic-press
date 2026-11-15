@@ -273,16 +273,16 @@ fn Font.read_cmap(mut self, data List[int])
             while i + 1 < stack.len()
                 lo := stack[i].as_bytes() else []
                 hi := stack[i + 1].as_bytes() else []
-                space.push([lo.len(), int_of(lo), int_of(hi)])
+                self.space.push([lo.len(), int_of(lo), int_of(hi)])
                 i += 2
         elif op == "endbfchar"
             mut i := 0
             while i + 1 < stack.len()
                 src := stack[i].as_bytes() else []
                 if dst := stack[i + 1].as_bytes()
-                    uni[int_of(src)] = utf16(units_of(dst))
+                    self.uni[int_of(src)] = utf16(units_of(dst))
                 elif n := stack[i + 1].as_name()
-                    uni[int_of(src)] = glyph_text(n) else ""
+                    self.uni[int_of(src)] = glyph_text(n) else ""
                 i += 2
         elif op == "endbfrange"
             mut i := 0
@@ -290,10 +290,10 @@ fn Font.read_cmap(mut self, data List[int])
                 lo := int_of(stack[i].as_bytes() else [])
                 hi := int_of(stack[i + 1].as_bytes() else [])
                 if dst := stack[i + 2].as_bytes()
-                    ranges.push(UniRange(lo: lo, hi: hi, dst: units_of(dst)))
+                    self.ranges.push(UniRange(lo: lo, hi: hi, dst: units_of(dst)))
                 elif arr := stack[i + 2].as_arr()
                     for k in 0..arr.len().min(hi - lo + 1)
-                        uni[lo + k] = utf16(units_of(arr[k].as_bytes() else []))
+                        self.uni[lo + k] = utf16(units_of(arr[k].as_bytes() else []))
                 i += 3
         elif op == "usecmap" or op == "endcidrange" or op == "endcidchar"
             stack = []
@@ -337,7 +337,7 @@ pub fn Doc.font(self, o Obj, name str) Font ! PdfError
         if desc.len() > 0
             dd := resolve(desc[0]).as_dict() else {}
             f.default_w = (key(dd, "DW").as_num() else 1000.0) * 0.001
-            read_cid_widths(mut f, key(dd, "W").as_arr() else [])
+            self.read_cid_widths(mut f, key(dd, "W").as_arr() else [])
         f.prepare()
         return f
     if subtype == "Type3"
@@ -395,56 +395,56 @@ fn Doc.read_cid_widths(self, mut f Font, w List[Obj])
 
 ## The text of one code.
 fn Font.text_of(self, code int) str?
-    if t := uni.get(code)
+    if t := self.uni.get(code)
         return t
-    for r in ranges
+    for r in self.ranges
         if code >= r.lo and code <= r.hi and r.dst.len() > 0
             mut u := r.dst
             u[u.len() - 1] += code - r.lo
             return utf16(u)
-    if n := names.get(code)
+    if n := self.names.get(code)
         return glyph_text(n)
     none
 
 ## How many bytes the code at `b[i]` takes (9.7.6.2).
 fn Font.code_len(self, b List[int], i int) int
-    if space.len() == 0
-        return width_bytes
+    if self.space.len() == 0
+        return self.width_bytes
     for n in 1..5
         if i + n > b.len()
             break
         v := int_of(b[i..i + n])
-        for r in space
+        for r in self.space
             if r[0] == n and v >= r[1] and v <= r[2]
                 return n
-    if width_bytes <= b.len() - i then width_bytes else 1
+    if self.width_bytes <= b.len() - i then self.width_bytes else 1
 
 ## Splits a shown string into codes (9.4.3).
 pub fn Font.codes(self, b List[int]) List[Code]
     mut out := List[Code]()
     mut i := 0
-    fixed := space.len() == 0
-    if fixed and width_bytes == 1 and table.len() == 256
+    fixed := self.space.len() == 0
+    if fixed and self.width_bytes == 1 and self.table.len() == 256
         for c in b
-            out.push(table[c])
+            out.push(self.table[c])
         return out
     while i < b.len()
-        mut n := width_bytes
+        mut n := self.width_bytes
         mut code := b[i]
         if fixed and n == 2 and i + 1 < b.len()
             code = code * 256 + b[i + 1]
         elif not fixed or n != 1
-            n = code_len(b, i)
+            n = self.code_len(b, i)
             code = int_of(b[i..(i + n).min(b.len())])
-        out.push(memo.get(code) else make_code(code, n))
+        out.push(self.memo.get(code) else self.make_code(code, n))
         i += n
     out
 
 fn Font.make_code(self, code int, n int) Code
-    t := text_of(code)
+    t := self.text_of(code)
     Code(
         text: plain(t else ""),
-        w: widths.get(code) else default_w,
+        w: self.widths.get(code) else self.default_w,
         space: n == 1 and code == 32,
         known: t != none,
     )
@@ -452,21 +452,21 @@ fn Font.make_code(self, code int, n int) Code
 ## Decodes every code the font maps once: all 256 for a one-byte font, and
 ## the mapped and measured codes of a CID font.
 fn Font.prepare(mut self)
-    if width_bytes == 1 and space.len() == 0
-        table = [make_code(c, 1) for c in 0..256]
+    if self.width_bytes == 1 and self.space.len() == 0
+        self.table = [self.make_code(c, 1) for c in 0..256]
         return
     mut codes := Set[int]()
-    for c in uni.keys()
+    for c in self.uni.keys()
         codes.add(c)
-    for c in widths.keys()
+    for c in self.widths.keys()
         codes.add(c)
-    for r in ranges
+    for r in self.ranges
         if r.hi - r.lo < 4096
             for c in r.lo..=r.hi
                 codes.add(c)
     for c in codes
-        n := if c < 256 and width_bytes == 1 then 1 else width_bytes
-        memo[c] = make_code(c, n)
+        n := if c < 256 and self.width_bytes == 1 then 1 else self.width_bytes
+        self.memo[c] = self.make_code(c, n)
 
 @test fn maps_glyph_names()
     assert_eq(glyph_text("A"), "A")

@@ -18,9 +18,9 @@ pub fn Ocr.new(on bool) Ocr
     Ocr(cache: ref ShapeCache(shapes: []), on: on)
 
 pub fn Ocr.shapes(self) Shapes
-    if cache.shapes.len() == 0
-        cache.shapes.push(Shapes.load(SHAPES))
-    cache.shapes[0]
+    if self.cache.shapes.len() == 0
+        self.cache.shapes.push(Shapes.load(SHAPES))
+    self.cache.shapes[0]
 
 ## A recognized word in image pixels.
 pub struct Word
@@ -145,9 +145,9 @@ pub fn in_context(labels List[str]) List[str]
 ## kept in the page cache, so each page is recognized once.
 pub fn Ocr.page(self, ps reader.Pages, i int) reader.Page
     p := ps.get(i)
-    if not on or not p.model.image_only or p.model.ocr
+    if not self.on or not p.model.image_only or p.model.ocr
         return p
-    q := recognize(ps.doc, p, shapes())
+    q := recognize(ps.doc, p, self.shapes())
     ps.put(i, q)
     q
 

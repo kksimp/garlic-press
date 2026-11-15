@@ -204,11 +204,11 @@ fn hex2(v int) str
 pub fn Shapes.save(self) str
     n := dims()
     mut out := List[str]()
-    for i in 0..labels.len()
-        code := [c.code().to_hex() for c in labels[i].chars()].join("+")
+    for i in 0..self.labels.len()
+        code := [c.code().to_hex() for c in self.labels[i].chars()].join("+")
         mut hx := List[str]()
         for k in 0..n
-            v := rows[i * n + k]
+            v := self.rows[i * n + k]
             hx.push(hex2(if k < SHAPE then (v * 255.0).round().to_int() else (v / GEOMETRY * 64.0).round().to_int()))
         out.push("{code} {hx.join("")}")
     out.join("\n")
@@ -223,7 +223,7 @@ pub struct Guess
 ## |f - p|^2 = |f|^2 + |p|^2 - 2 f.p, the products in one matmul.
 pub fn Shapes.classify(self, feats List[List[float]]) List[Guess]
     n := dims()
-    m := labels.len()
+    m := self.labels.len()
     if feats.len() == 0 or m == 0
         return []
     mut flat := List[float]()
@@ -231,13 +231,13 @@ pub fn Shapes.classify(self, feats List[List[float]]) List[Guess]
         flat.extend(f)
     dots := tensor
         .from(flat, [feats.len(), n])
-        .matmul(tensor.from(rows, [m, n]).transpose())
+        .matmul(tensor.from(self.rows, [m, n]).transpose())
         .to_list()
     mut norms := List[float]()
     for j in 0..m
         mut s := 0.0
         for k in 0..n
-            s += rows[j * n + k] * rows[j * n + k]
+            s += self.rows[j * n + k] * self.rows[j * n + k]
         norms.push(s)
     mut out := List[Guess]()
     for i in 0..feats.len()
@@ -254,14 +254,14 @@ pub fn Shapes.classify(self, feats List[List[float]]) List[Guess]
         # The nearest shape with another label sets the margin.
         mut second := 1.0e18
         for j in 0..m
-            if labels[j] != labels[best]
+            if self.labels[j] != self.labels[best]
                 d := norms[j] - 2.0 * dots[i * m + j]
                 if d < second
                     second = d
         d1 := (bd + fn2).max(0.0).sqrt()
         d2 := (second + fn2).max(0.0).sqrt()
         sure := if d2 > 0.0 then ((d2 - d1) / d2).max(0.0).min(1.0) else 0.0
-        out.push(Guess(label: labels[best], sure: sure, dist: d1))
+        out.push(Guess(label: self.labels[best], sure: sure, dist: d1))
     out
 
 @test fn saves_and_loads_shapes()

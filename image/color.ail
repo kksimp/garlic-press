@@ -15,7 +15,7 @@ pub fn Rgba.new(width int, height int, color int) Rgba
 ## The image as bytes `R, G, B, A` per pixel, for a window's bitmap surface.
 pub fn Rgba.bytes(self) List[int]
     mut out := List[int]()
-    for p in px
+    for p in self.px
         out.push(p.shr(16).bit_and(255))
         out.push(p.shr(8).bit_and(255))
         out.push(p.bit_and(255))

@@ -55,7 +55,7 @@ fn parse_args(raw List[str]) Args
     a
 
 fn Args.word(self, i int) str?
-    if i < words.len() then words[i] else none
+    if i < self.words.len() then self.words[i] else none
 
 fn open_doc(path str) reader.Doc ! reader.PdfError
     reader.Doc.open(reader.read_file(path)?)

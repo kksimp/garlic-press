@@ -110,13 +110,13 @@ pub fn Doc.page_glyphs(self, page Map[str, Obj]) PageText ! PdfError
     PageText(glyphs: it.glyphs, images: it.images, placed: it.placed)
 
 fn Interp.font(mut self, res Map[str, Obj], scope str) Font?
-    k := "{scope}/{gs.font}"
-    if f := fonts.get(k)
+    k := "{scope}/{self.gs.font}"
+    if f := self.fonts.get(k)
         return f
-    fd := doc.key(res, "Font").as_dict() else return none
-    o := fd.get(gs.font) else return none
-    f := doc.font(o, gs.font) else return none
-    fonts[k] = f
+    fd := self.doc.key(res, "Font").as_dict() else return none
+    o := fd.get(self.gs.font) else return none
+    f := self.doc.font(o, self.gs.font) else return none
+    self.fonts[k] = f
     f
 
 ## Runs one content stream; `scope` keys the font cache by the resources
@@ -135,7 +135,7 @@ fn Interp.run(mut self, data List[int], res Map[str, Obj], scope str) ! PdfError
             continue
         if ops.len() > 32
             ops = []
-        apply(op, ops, res, scope, mut l)?
+        self.apply(op, ops, res, scope, mut l)?
         ops = []
 
 fn Interp.apply(
@@ -148,81 +148,84 @@ fn Interp.apply(
 ) ! PdfError
     n := floats(ops)
     match op
-        "q" => stack.push(gs)
+        "q" => self.stack.push(self.gs)
         "Q" =>
-            if s := stack.pop()
-                gs = s
+            if s := self.stack.pop()
+                self.gs = s
         "cm" =>
             if n.len() == 6
-                gs.ctm = mul(n, gs.ctm)
+                self.gs.ctm = mul(n, self.gs.ctm)
         "BT" =>
-            tm = IDENTITY
-            tlm = IDENTITY
+            self.tm = IDENTITY
+            self.tlm = IDENTITY
         "Tf" =>
             if ops.len() == 2
-                gs.font = ops[0].as_name() else ""
-                gs.size = n[1]
-        "Tc" => gs.tc = n.first() else 0.0
-        "Tw" => gs.tw = n.first() else 0.0
-        "Tz" => gs.th = (n.first() else 100.0) / 100.0
-        "TL" => gs.tl = n.first() else 0.0
-        "Ts" => gs.rise = n.first() else 0.0
+                self.gs.font = ops[0].as_name() else ""
+                self.gs.size = n[1]
+        "Tc" => self.gs.tc = n.first() else 0.0
+        "Tw" => self.gs.tw = n.first() else 0.0
+        "Tz" => self.gs.th = (n.first() else 100.0) / 100.0
+        "TL" => self.gs.tl = n.first() else 0.0
+        "Ts" => self.gs.rise = n.first() else 0.0
         "Td" =>
             if n.len() == 2
-                tlm = mul(translate(n[0], n[1]), tlm)
-                tm = tlm
+                self.tlm = mul(translate(n[0], n[1]), self.tlm)
+                self.tm = self.tlm
         "TD" =>
             if n.len() == 2
-                gs.tl = -n[1]
-                tlm = mul(translate(n[0], n[1]), tlm)
-                tm = tlm
+                self.gs.tl = -n[1]
+                self.tlm = mul(translate(n[0], n[1]), self.tlm)
+                self.tm = self.tlm
         "Tm" =>
             if n.len() == 6
-                tlm = n
-                tm = n
-        "T*" => next_line()
-        "Tj" => show(ops.last() else Obj.Null, res, scope)
+                self.tlm = n
+                self.tm = n
+        "T*" => self.next_line()
+        "Tj" => self.show(ops.last() else Obj.Null, res, scope)
         "'" =>
-            next_line()
-            show(ops.last() else Obj.Null, res, scope)
+            self.next_line()
+            self.show(ops.last() else Obj.Null, res, scope)
         "\"" =>
             if ops.len() == 3
-                gs.tw = n[0]
-                gs.tc = n[1]
-            next_line()
-            show(ops.last() else Obj.Null, res, scope)
+                self.gs.tw = n[0]
+                self.gs.tc = n[1]
+            self.next_line()
+            self.show(ops.last() else Obj.Null, res, scope)
         "TJ" =>
             for item in (ops.last() else Obj.Null).as_arr() else []
                 if adj := item.as_num()
-                    tm = mul(translate(-adj / 1000.0 * gs.size * gs.th, 0.0), tm)
+                    self.tm = mul(
+                        translate(-adj / 1000.0 * self.gs.size * self.gs.th, 0.0),
+                        self.tm,
+                    )
                 else
-                    show(item, res, scope)
-        "Do" => draw_xobject(ops.first() else Obj.Null, res, scope)?
-        "BI" => skip_inline_image(mut l)
+                    self.show(item, res, scope)
+        "Do" => self.draw_xobject(ops.first() else Obj.Null, res, scope)?
+        "BI" => self.skip_inline_image(mut l)
         _ => return
 
 fn Interp.next_line(mut self)
-    tlm = mul(translate(0.0, -gs.tl), tlm)
-    tm = tlm
+    self.tlm = mul(translate(0.0, -self.gs.tl), self.tlm)
+    self.tm = self.tlm
 
 ## Shows a string: one glyph per code, advancing the text matrix (9.4.4).
 fn Interp.show(mut self, s Obj, res Map[str, Obj], scope str)
     b := s.as_bytes() else return
-    f := font(res, scope) else return
+    f := self.font(res, scope) else return
     # Only the translation of the text matrix changes along a string, so
     # tm x ctm is computed once and moved by each advance.
-    m := mul(tm, gs.ctm)
+    m := mul(self.tm, self.gs.ctm)
     mut e := m[4]
     mut fy := m[5]
-    size := gs.size * (m[2] * m[2] + m[3] * m[3]).sqrt()
+    size := self.gs.size * (m[2] * m[2] + m[3] * m[3]).sqrt()
     mut total := 0.0
     for code in f.codes(b)
-        tw := if code.space then gs.tw else 0.0
-        tx := (code.w * gs.size + gs.tc + tw) * gs.th
-        glyphs.push(Glyph(
+        tw := if code.space then self.gs.tw else 0.0
+        tx := (code.w * self.gs.size + self.gs.tc + tw) * self.gs.th
+        self.glyphs.push(Glyph(
             text: code.text,
-            x: e + gs.rise * m[2],
-            y: fy + gs.rise * m[3],
+            x: e + self.gs.rise * m[2],
+            y: fy + self.gs.rise * m[3],
             w: tx * m[0],
             size: size,
             known: code.known,
@@ -230,38 +233,45 @@ fn Interp.show(mut self, s Obj, res Map[str, Obj], scope str)
         e += tx * m[0]
         fy += tx * m[1]
         total += tx
-    tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + total * tm[0], tm[5] + total * tm[1]]
+    self.tm = [
+        self.tm[0],
+        self.tm[1],
+        self.tm[2],
+        self.tm[3],
+        self.tm[4] + total * self.tm[0],
+        self.tm[5] + total * self.tm[1],
+    ]
 
 ## A form XObject runs in place; an image only counts (8.8, 8.10).
 fn Interp.draw_xobject(mut self, name Obj, res Map[str, Obj], scope str) ! PdfError
     n := name.as_name() else return
-    xd := doc.key(res, "XObject").as_dict() else return
-    x := doc.resolve(xd.get(n) else Obj.Null)
+    xd := self.doc.key(res, "XObject").as_dict() else return
+    x := self.doc.resolve(xd.get(n) else Obj.Null)
     d := x.as_dict() else return
-    sub := doc.key(d, "Subtype").as_name() else ""
+    sub := self.doc.key(d, "Subtype").as_name() else ""
     if sub == "Image"
-        images += 1
-        placed.push(Placed(obj: x, ctm: gs.ctm))
+        self.images += 1
+        self.placed.push(Placed(obj: x, ctm: self.gs.ctm))
         return
-    if sub != "Form" or depth > 12
+    if sub != "Form" or self.depth > 12
         return
-    saved := gs
-    saved_stack := stack.len()
-    m := floats(doc.key(d, "Matrix").as_arr() else [])
+    saved := self.gs
+    saved_stack := self.stack.len()
+    m := floats(self.doc.key(d, "Matrix").as_arr() else [])
     if m.len() == 6
-        gs.ctm = mul(m, gs.ctm)
-    inner := doc.key(d, "Resources").as_dict() else res
-    data := doc.stream_data(x) else return
-    depth += 1
-    run(data, inner, "{scope}/{n}")?
-    depth -= 1
-    gs = saved
-    while stack.len() > saved_stack
-        stack.pop()
+        self.gs.ctm = mul(m, self.gs.ctm)
+    inner := self.doc.key(d, "Resources").as_dict() else res
+    data := self.doc.stream_data(x) else return
+    self.depth += 1
+    self.run(data, inner, "{scope}/{n}")?
+    self.depth -= 1
+    self.gs = saved
+    while self.stack.len() > saved_stack
+        self.stack.pop()
 
 ## Skips `ID` data up to `EI` (8.9.7).
 fn Interp.skip_inline_image(mut self, mut l Lexer)
-    images += 1
+    self.images += 1
     id := find_from(l.buf, ascii("ID"), l.pos) else l.buf.len()
     mut p := id + 3
     while p + 2 <= l.buf.len()
@@ -284,13 +294,13 @@ pub struct Line
     ends List[float]
 
 pub fn Line.right(self) float
-    ends.last() else x
+    self.ends.last() else self.x
 
 ## The box of characters `a..b` of the line: [x0, y0, x1, y1].
 pub fn Line.box(self, a int, b int) List[float]
-    x0 := if a < starts.len() then starts[a] else x
-    x1 := if b > 0 and b - 1 < ends.len() then ends[b - 1] else x0
-    [x0, y - size * 0.25, x1, y + size * 0.85]
+    x0 := if a < self.starts.len() then self.starts[a] else self.x
+    x1 := if b > 0 and b - 1 < self.ends.len() then self.ends[b - 1] else x0
+    [x0, self.y - self.size * 0.25, x1, self.y + self.size * 0.85]
 
 fn glyph(t str, x float, y float) Glyph
     Glyph(text: t, x: x, y: y, w: 5.0, size: 10.0, known: true)
